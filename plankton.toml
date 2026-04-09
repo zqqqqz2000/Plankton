@@ -1,0 +1,22 @@
+recent_audit_limit = 20
+
+request_template = """
+Manual review request
+Actor: {{ context.requested_by }}
+Resource: {{ context.resource }}
+Reason: {{ context.reason }}
+Script path: {{ context.script_path or "n/a" }}
+Policy mode: {{ policy_mode }}
+Call chain:
+{% for step in context.call_chain %}
+- {{ step }}
+{% else %}
+- n/a
+{% endfor %}
+Metadata:
+{% for key, value in context.metadata|items %}
+- {{ key }}={{ value }}
+{% else %}
+- n/a
+{% endfor %}
+"""

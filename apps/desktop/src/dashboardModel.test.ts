@@ -1,0 +1,342 @@
+import { describe, expect, it } from "vitest";
+
+import {
+  escapeHtml,
+  getDashboardSummary,
+  getRequestAuditRecords,
+  getResolvedAutoDecisionEntries,
+  getSuggestionTrace,
+  getSelectedRequest,
+  toKeyValueEntries,
+} from "./dashboardModel";
+import type { DashboardData } from "./types";
+
+const dashboardFixture: DashboardData = {
+  pending_requests: [
+    {
+      id: "request-1",
+      context: {
+        resource: "secret/api-token",
+        reason: "Run smoke test",
+        requested_by: "alice",
+        script_path: "scripts/smoke.sh",
+        call_chain: ["scripts/smoke.sh"],
+        env_vars: {
+          API_ENV: "dev",
+        },
+        metadata: {
+          team: "security",
+        },
+        created_at: "2026-04-09T12:00:00Z",
+      },
+      policy_mode: "manual_only",
+      approval_status: "pending",
+      final_decision: null,
+      provider_kind: "mock",
+      rendered_prompt: "prompt",
+      llm_suggestion: null,
+      automatic_decision: null,
+      created_at: "2026-04-09T12:00:00Z",
+      updated_at: "2026-04-09T12:00:00Z",
+      resolved_at: null,
+    },
+    {
+      id: "request-2",
+      context: {
+        resource: "env/prod-db",
+        reason: "Investigate issue",
+        requested_by: "bob",
+        script_path: null,
+        call_chain: [],
+        env_vars: {},
+        metadata: {
+          incident: "INC-42",
+        },
+        created_at: "2026-04-09T12:05:00Z",
+      },
+      policy_mode: "manual_only",
+      approval_status: "pending",
+      final_decision: null,
+      provider_kind: "mock",
+      rendered_prompt: "prompt",
+      llm_suggestion: null,
+      automatic_decision: null,
+      created_at: "2026-04-09T12:05:00Z",
+      updated_at: "2026-04-09T12:05:00Z",
+      resolved_at: null,
+    },
+  ],
+  recent_audit_records: [
+    {
+      id: "audit-1",
+      request_id: "request-1",
+      action: "request_submitted",
+      actor: "alice",
+      note: null,
+      payload: {
+        resource: "secret/api-token",
+      },
+      created_at: "2026-04-09T12:00:00Z",
+    },
+    {
+      id: "audit-2",
+      request_id: "request-2",
+      action: "request_submitted",
+      actor: "bob",
+      note: "Needs incident access",
+      payload: {
+        resource: "env/prod-db",
+      },
+      created_at: "2026-04-09T12:05:00Z",
+    },
+  ],
+};
+
+describe("dashboardModel", () => {
+  it("escapes HTML before it is rendered into templates", () => {
+    expect(escapeHtml('<script>alert("x")</script>')).toBe(
+      "&lt;script&gt;alert(&quot;x&quot;)&lt;/script&gt;",
+    );
+  });
+
+  it("computes queue and audit summary information", () => {
+    expect(getDashboardSummary(dashboardFixture)).toEqual({
+      pendingCount: 2,
+      requesterCount: 2,
+      auditCount: 2,
+      newestRequest: dashboardFixture.pending_requests[1],
+    });
+  });
+
+  it("returns the selected request and falls back to the first pending item", () => {
+    expect(getSelectedRequest(dashboardFixture, "request-2")?.id).toBe(
+      "request-2",
+    );
+    expect(getSelectedRequest(dashboardFixture, "missing")?.id).toBe(
+      "request-1",
+    );
+  });
+
+  it("filters audit records for the selected request", () => {
+    expect(
+      getRequestAuditRecords(
+        dashboardFixture.recent_audit_records,
+        "request-2",
+      ),
+    ).toHaveLength(1);
+    expect(
+      getRequestAuditRecords(dashboardFixture.recent_audit_records, null),
+    ).toEqual([]);
+  });
+
+  it("sorts key value entries for consistent rendering", () => {
+    expect(
+      toKeyValueEntries({
+        zebra: "2",
+        alpha: "1",
+      }),
+    ).toEqual([
+      ["alpha", "1"],
+      ["zebra", "2"],
+    ]);
+  });
+
+  it("derives recent resolved auto decisions from audit records", () => {
+    const entries = getResolvedAutoDecisionEntries([
+      ...dashboardFixture.recent_audit_records,
+      {
+        id: "audit-3",
+        request_id: "request-2",
+        action: "automatic_decision_recorded",
+        actor: "system_auto",
+        note: "Matched allowlist and low risk",
+        payload: {
+          auto_disposition: "allow",
+          decision_source: "llm_low_risk_allow",
+          approval_status: "approved",
+          final_decision: "allow",
+          provider_called: true,
+          secret_exposure_risk: false,
+          matched_rule_ids: ["dev_allow"],
+          auto_rationale_summary: "Matched allowlist and low risk",
+          fail_closed: false,
+          evaluated_at: "2026-04-09T12:06:00Z",
+          provider_kind: "openai_compatible",
+          provider_model: "gpt-5.4-mini",
+        },
+        created_at: "2026-04-09T12:06:00Z",
+      },
+      {
+        id: "audit-4",
+        request_id: "request-1",
+        action: "automatic_decision_recorded",
+        actor: "system_auto",
+        note: "Escalated due to secret exposure risk",
+        payload: {
+          auto_disposition: "escalate",
+          decision_source: "secret_exposure_guardrail",
+          approval_status: "pending",
+          final_decision: null,
+          provider_called: false,
+          secret_exposure_risk: true,
+          matched_rule_ids: [],
+          auto_rationale_summary: "Escalated due to secret exposure risk",
+          fail_closed: true,
+          evaluated_at: "2026-04-09T12:01:00Z",
+        },
+        created_at: "2026-04-09T12:01:00Z",
+      },
+    ]);
+
+    expect(entries).toEqual([
+      {
+        request_id: "request-2",
+        resource: "env/prod-db",
+        reason: "Needs incident access",
+        requested_by: "bob",
+        submitted_at: "2026-04-09T12:05:00Z",
+        recorded_at: "2026-04-09T12:06:00Z",
+        approval_status: "approved",
+        final_decision: "allow",
+        automatic_decision: expect.objectContaining({
+          auto_disposition: "allow",
+          decision_source: "llm_low_risk_allow",
+          provider_called: true,
+          matched_rule_ids: ["dev_allow"],
+        }),
+      },
+    ]);
+  });
+
+  it("keeps resolved auto entries even when request submission metadata is absent", () => {
+    const entries = getResolvedAutoDecisionEntries([
+      {
+        id: "audit-5",
+        request_id: "request-3",
+        action: "automatic_decision_recorded",
+        actor: "system_auto",
+        note: "Denied by production guardrail",
+        payload: {
+          auto_disposition: "deny",
+          decision_source: "production_guardrail",
+          approval_status: "rejected",
+          final_decision: "deny",
+          provider_called: false,
+          secret_exposure_risk: false,
+          matched_rule_ids: ["prod_deny"],
+          auto_rationale_summary: "Denied by production guardrail",
+          fail_closed: false,
+          evaluated_at: "2026-04-09T12:10:00Z",
+        },
+        created_at: "2026-04-09T12:10:00Z",
+      },
+    ]);
+
+    expect(entries).toEqual([
+      expect.objectContaining({
+        request_id: "request-3",
+        resource: null,
+        reason: null,
+        requested_by: null,
+        automatic_decision: expect.objectContaining({
+          auto_disposition: "deny",
+          decision_source: "production_guardrail",
+        }),
+      }),
+    ]);
+  });
+
+  it("extracts ACP provider trace from request audit records", () => {
+    const trace = getSuggestionTrace([
+      {
+        id: "audit-6",
+        request_id: "request-4",
+        action: "llm_suggestion_generated",
+        actor: "acp_codex",
+        note: "Low-risk ACP suggestion",
+        payload: {
+          provider_model: "codex@1.2.3",
+          provider_trace: {
+            transport: "stdio",
+            package_name: "@zed-industries/codex-acp",
+            package_version: "0.11.1",
+            session_id: "session-123",
+            client_request_id: "client-456",
+            agent_name: "codex",
+            agent_version: "1.2.3",
+          },
+        },
+        created_at: "2026-04-09T12:11:00Z",
+      },
+    ]);
+
+    expect(trace).toEqual({
+      provider_kind: "acp_codex",
+      provider_model: "codex@1.2.3",
+      provider_response_id: null,
+      x_request_id: null,
+      usage_total_tokens: null,
+      provider_trace: {
+        transport: "stdio",
+        protocol: null,
+        api_version: null,
+        output_format: null,
+        stop_reason: null,
+        package_name: "@zed-industries/codex-acp",
+        package_version: "0.11.1",
+        session_id: "session-123",
+        client_request_id: "client-456",
+        agent_name: "codex",
+        agent_version: "1.2.3",
+        beta_headers: [],
+      },
+    });
+  });
+
+  it("extracts Claude provider trace and identifiers from request audit records", () => {
+    const trace = getSuggestionTrace([
+      {
+        id: "audit-7",
+        request_id: "request-5",
+        action: "llm_suggestion_generated",
+        actor: "claude",
+        note: "Claude low-risk suggestion",
+        payload: {
+          provider_model: "claude-3-7-sonnet-20250219",
+          provider_response_id: "msg_123",
+          x_request_id: "req_claude_123",
+          provider_trace: {
+            transport: "https",
+            protocol: "anthropic_messages",
+            api_version: "2023-06-01",
+            output_format: "json_schema",
+            stop_reason: "end_turn",
+          },
+        },
+        created_at: "2026-04-09T12:12:00Z",
+      },
+    ]);
+
+    expect(trace).toEqual({
+      provider_kind: "claude",
+      provider_model: "claude-3-7-sonnet-20250219",
+      provider_response_id: "msg_123",
+      x_request_id: "req_claude_123",
+      usage_total_tokens: null,
+      provider_trace: {
+        transport: "https",
+        protocol: "anthropic_messages",
+        api_version: "2023-06-01",
+        output_format: "json_schema",
+        stop_reason: "end_turn",
+        package_name: null,
+        package_version: null,
+        session_id: null,
+        client_request_id: null,
+        agent_name: null,
+        agent_version: null,
+        beta_headers: [],
+      },
+    });
+  });
+});

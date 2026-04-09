@@ -1,0 +1,29 @@
+[package]
+name = "plankton-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+agent-client-protocol.workspace = true
+async-openai.workspace = true
+async-trait.workspace = true
+chrono.workspace = true
+config.workspace = true
+directories.workspace = true
+futures = "0.3"
+minijinja.workspace = true
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+shell-words = "1.1"
+sha2.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+clap.workspace = true
+tokio.workspace = true
+wiremock = "0.6"

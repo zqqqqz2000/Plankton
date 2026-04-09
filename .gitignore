@@ -1,0 +1,13 @@
+target/
+dist/
+node_modules/
+.plankton/
+.artifacts/
+.openaquarium/
+.playwright-mcp/
+*.db
+*.db-shm
+*.db-wal
+.DS_Store
+p2-ui-*.png
+p3-desktop-*.png

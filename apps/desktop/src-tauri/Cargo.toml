@@ -1,0 +1,19 @@
+[package]
+name = "plankton-desktop"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[build-dependencies]
+tauri-build.workspace = true
+
+[dependencies]
+plankton-core = { path = "../../../crates/plankton-core" }
+plankton-store = { path = "../../../crates/plankton-store" }
+anyhow.workspace = true
+tauri.workspace = true
+tauri-plugin-log.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
