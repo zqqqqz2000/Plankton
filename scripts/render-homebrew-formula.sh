@@ -19,20 +19,13 @@ lookup_sha() {
   awk -v file="$archive_name" '$2 == file { print $1; exit }' "$checksums_file"
 }
 
-darwin_arm_archive="${binary_name}-v${version}-aarch64-apple-darwin.tar.gz"
-darwin_amd_archive="${binary_name}-v${version}-x86_64-apple-darwin.tar.gz"
-linux_amd_archive="${binary_name}-v${version}-x86_64-unknown-linux-gnu.tar.gz"
+source_archive="plankton-v${version}-source.tar.gz"
+source_sha="$(lookup_sha "$source_archive")"
 
-darwin_arm_sha="$(lookup_sha "$darwin_arm_archive")"
-darwin_amd_sha="$(lookup_sha "$darwin_amd_archive")"
-linux_amd_sha="$(lookup_sha "$linux_amd_archive")"
-
-for checksum in "$darwin_arm_sha" "$darwin_amd_sha" "$linux_amd_sha"; do
-  if [ -z "$checksum" ]; then
-    echo "missing checksum in ${checksums_file}" >&2
-    exit 1
-  fi
-done
+if [ -z "$source_sha" ]; then
+  echo "missing checksum for ${source_archive} in ${checksums_file}" >&2
+  exit 1
+fi
 
 cat <<EOF
 class ${formula_class} < Formula
@@ -40,24 +33,13 @@ class ${formula_class} < Formula
   homepage "${homepage_url}"
   version "${version}"
   license "MIT"
+  url "${release_base_url}/${source_archive}"
+  sha256 "${source_sha}"
 
-  on_macos do
-    if Hardware::CPU.arm?
-      url "${release_base_url}/${darwin_arm_archive}"
-      sha256 "${darwin_arm_sha}"
-    else
-      url "${release_base_url}/${darwin_amd_archive}"
-      sha256 "${darwin_amd_sha}"
-    end
-  end
-
-  on_linux do
-    url "${release_base_url}/${linux_amd_archive}"
-    sha256 "${linux_amd_sha}"
-  end
+  depends_on "rust" => :build
 
   def install
-    bin.install "${binary_name}"
+    system "cargo", "install", "--locked", "--path", "crates/plankton-cli", "--root", prefix
     prefix.install_metafiles "LICENSE", "README.md"
   end
 
