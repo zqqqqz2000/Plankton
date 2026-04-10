@@ -15,7 +15,10 @@ pub use automatic::{
     secret_exposure_risk, AutomaticDecisionSource, AutomaticDecisionTrace, AutomaticDisposition,
     AUTO_ALLOW_MAX_RISK_SCORE, AUTO_DENY_MIN_RISK_SCORE,
 };
-pub use config::{load_settings, PlanktonSettings, SettingsError};
+pub use config::{
+    load_settings, save_user_default_policy_mode, user_settings_path, PlanktonSettings,
+    SettingsError, SettingsPersistError,
+};
 pub use domain::{
     AccessRequest, ApprovalStatus, AuditAction, AuditRecord, DashboardData, Decision, DomainError,
     LlmSuggestion, LlmSuggestionUsage, PolicyMode, ProviderInputSnapshot, ProviderTrace,

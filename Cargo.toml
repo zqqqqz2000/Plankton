@@ -6,6 +6,8 @@ resolver = "2"
 edition = "2021"
 version = "0.1.0"
 license = "MIT"
+homepage = "https://github.com/zqqqqz2000/Plankton"
+repository = "https://github.com/zqqqqz2000/Plankton"
 
 [workspace.dependencies]
 agent-client-protocol = { version = "0.10.4", features = ["unstable_session_usage"] }
@@ -30,4 +32,5 @@ tokio = { version = "1.44", features = ["macros", "rt-multi-thread", "sync", "io
 tokio-util = { version = "0.7", features = ["compat"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+toml = "0.8"
 uuid = { version = "1.8", features = ["serde", "v4"] }

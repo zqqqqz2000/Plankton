@@ -16,9 +16,9 @@ use tracing_subscriber::{fmt, EnvFilter};
 #[command(
     author,
     version,
-    about = "Plankton CLI for manual review, assisted suggestions, and automatic LLM decisions",
+    about = "Plankton CLI for submitting access attempts and reading request, suggestion, and audit state",
     arg_required_else_help = true,
-    after_help = "Examples:\n  cargo run -p plankton-cli -- get secret/api-token --reason \"Smoke test\" --requested-by alice\n  cargo run -p plankton-cli -- get secret/api-token --reason \"Auto smoke\" --policy-mode auto\n  cargo run -p plankton-cli -- status <request-id>\n  cargo run -p plankton-cli -- suggestion <request-id>\n  cargo run -p plankton-cli -- queue\n  cargo run -p plankton-cli -- audit --limit 10\n  cargo run -p plankton-cli -- approve <request-id> --note \"Reviewed in desktop queue\""
+    after_help = "Examples:\n  cargo run -p plankton-cli -- get secret/api-token --reason \"Smoke test\" --requested-by alice\n  cargo run -p plankton-cli -- get secret/api-token --reason \"Auto smoke\" --policy-mode auto\n  cargo run -p plankton-cli -- status <request-id>\n  cargo run -p plankton-cli -- suggestion <request-id>\n  cargo run -p plankton-cli -- queue --limit 10\n  cargo run -p plankton-cli -- audit <request-id>\n\nHuman approvals happen in the desktop UI. After submission, this CLI is read-only."
 )]
 struct Cli {
     #[arg(
@@ -41,6 +41,7 @@ enum OutputFormat {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
 enum CliPolicyMode {
+    #[value(name = "human-review", alias = "manual-only")]
     ManualOnly,
     Auto,
     Assisted,
@@ -60,56 +61,32 @@ impl From<CliPolicyMode> for PolicyMode {
 enum Commands {
     #[command(
         visible_alias = "request",
-        about = "Submit a new access request for a sensitive resource"
+        about = "Submit a new access attempt for review and audit"
     )]
     Get(GetArgs),
     #[command(
-        about = "Show one request together with its LLM suggestion summary and audit timeline"
+        about = "Inspect one request together with its suggestion summary and audit timeline"
     )]
     Status {
         #[arg(help = "Request identifier returned by `get`")]
         request_id: String,
     },
-    #[command(about = "Show the focused LLM suggestion view for one request")]
+    #[command(about = "Inspect the focused LLM suggestion view for one request")]
     Suggestion {
         #[arg(help = "Request identifier returned by `get`")]
         request_id: String,
     },
-    #[command(about = "List pending approval requests")]
+    #[command(about = "List pending requests that still require desktop review")]
     Queue {
         #[arg(long, help = "Show at most N pending requests")]
         limit: Option<usize>,
     },
-    #[command(about = "Show recent audit records or the audit trail for one request")]
+    #[command(about = "Inspect recent audit records or the audit trail for one request")]
     Audit {
-        #[arg(help = "Optional request identifier to scope audit output")]
+        #[arg(help = "Optional request identifier returned by `get` to scope audit output")]
         request_id: Option<String>,
         #[arg(long, default_value_t = 20, help = "Maximum records to print")]
         limit: u32,
-    },
-    #[command(about = "Approve a pending request")]
-    Approve {
-        #[arg(help = "Request identifier to approve")]
-        request_id: String,
-        #[arg(
-            long,
-            help = "Reviewer identity. Defaults to the current OS user when omitted"
-        )]
-        actor: Option<String>,
-        #[arg(long, help = "Optional audit note that explains the approval")]
-        note: Option<String>,
-    },
-    #[command(about = "Reject a pending request")]
-    Reject {
-        #[arg(help = "Request identifier to reject")]
-        request_id: String,
-        #[arg(
-            long,
-            help = "Reviewer identity. Defaults to the current OS user when omitted"
-        )]
-        actor: Option<String>,
-        #[arg(long, help = "Optional audit note that explains the rejection")]
-        note: Option<String>,
     },
 }
 
@@ -128,7 +105,7 @@ struct GetArgs {
     resource: Option<String>,
     #[arg(long = "resource", hide = true, group = "resource_input")]
     resource_flag: Option<String>,
-    #[arg(long, help = "Why the access is needed")]
+    #[arg(long, help = "Why this access attempt is needed")]
     reason: String,
     #[arg(
         long,
@@ -159,7 +136,7 @@ struct GetArgs {
         long,
         value_enum,
         default_value_t = CliPolicyMode::ManualOnly,
-        help = "Choose pure manual review, assisted review with an LLM suggestion, or fully automatic LLM disposition"
+        help = "Choose Human Review, assisted review with an LLM suggestion, or fully automatic LLM disposition"
     )]
     policy_mode: CliPolicyMode,
 }
@@ -463,30 +440,6 @@ async fn run() -> Result<()> {
                 let audit_output = build_audit_output(None, &records);
                 print_output(output, &audit_output, || render_audit_text(&records, None))?;
             }
-        }
-        Commands::Approve {
-            request_id,
-            actor,
-            note,
-        } => {
-            let actor = actor.unwrap_or_else(default_actor);
-            let request = store
-                .record_decision(&request_id, Decision::Allow, &actor, note)
-                .await
-                .with_context(|| format!("failed to approve request {request_id}"))?;
-            print_output(output, &request, || render_decision_text(&request, &actor))?;
-        }
-        Commands::Reject {
-            request_id,
-            actor,
-            note,
-        } => {
-            let actor = actor.unwrap_or_else(default_actor);
-            let request = store
-                .record_decision(&request_id, Decision::Deny, &actor, note)
-                .await
-                .with_context(|| format!("failed to reject request {request_id}"))?;
-            print_output(output, &request, || render_decision_text(&request, &actor))?;
         }
     }
 
@@ -1226,15 +1179,6 @@ fn render_automatic_audit_fields(payload: &Value) -> Vec<String> {
     ]
 }
 
-fn render_decision_text(request: &AccessRequest, actor: &str) -> String {
-    format!(
-        "{}\nreviewed_by: {}\nnext_action: cargo run -p plankton-cli -- audit {}",
-        render_request_text(request),
-        actor,
-        request.id
-    )
-}
-
 fn render_request_text(request: &AccessRequest) -> String {
     let suggestion_report = build_suggestion_report(request);
     let mut lines = vec![
@@ -1708,6 +1652,7 @@ fn parse_key_values(flag: &str, values: Vec<String>) -> Result<BTreeMap<String, 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use clap::CommandFactory;
 
     #[test]
     fn parses_get_command_with_positional_resource() {
@@ -1802,29 +1747,23 @@ mod tests {
     }
 
     #[test]
-    fn parses_approve_command_happy_path() {
+    fn parses_legacy_manual_only_policy_mode_alias() {
         let cli = Cli::try_parse_from([
             "plankton-cli",
-            "approve",
-            "request-123",
-            "--actor",
-            "reviewer",
-            "--note",
-            "approved for smoke test",
+            "get",
+            "secret/api-token",
+            "--reason",
+            "Need smoke test access",
+            "--policy-mode",
+            "manual-only",
         ])
-        .expect("approve command should parse");
+        .expect("legacy manual-only policy mode should still parse");
 
         match cli.command {
-            Commands::Approve {
-                request_id,
-                actor,
-                note,
-            } => {
-                assert_eq!(request_id, "request-123");
-                assert_eq!(actor, Some("reviewer".to_string()));
-                assert_eq!(note, Some("approved for smoke test".to_string()));
+            Commands::Get(args) => {
+                assert_eq!(args.policy_mode, CliPolicyMode::ManualOnly);
             }
-            _ => panic!("expected approve command"),
+            _ => panic!("expected get command"),
         }
     }
 
@@ -1851,6 +1790,51 @@ mod tests {
 
         assert_eq!(parsed.get("team"), Some(&"security".to_string()));
         assert_eq!(parsed.get("environment"), Some(&"dev".to_string()));
+    }
+
+    #[test]
+    fn rejects_removed_review_commands() {
+        let approve_error = Cli::try_parse_from(["plankton-cli", "approve", "request-123"])
+            .expect_err("approve should no longer parse");
+        let reject_error = Cli::try_parse_from(["plankton-cli", "reject", "request-123"])
+            .expect_err("reject should no longer parse");
+
+        assert!(approve_error
+            .to_string()
+            .contains("unrecognized subcommand"));
+        assert!(reject_error.to_string().contains("unrecognized subcommand"));
+    }
+
+    #[test]
+    fn help_text_marks_cli_as_read_only() {
+        let mut command = Cli::command();
+        let help = command.render_long_help().to_string();
+        let subcommands = Cli::command()
+            .get_subcommands()
+            .map(|command| command.get_name().to_string())
+            .collect::<Vec<_>>();
+
+        assert!(help.contains("Human approvals happen in the desktop UI."));
+        assert!(help.contains("read-only"));
+        assert!(!subcommands.iter().any(|name| name == "approve"));
+        assert!(!subcommands.iter().any(|name| name == "reject"));
+        assert!(!help.contains("approve <request-id>"));
+        assert!(!help.contains("reject <request-id>"));
+    }
+
+    #[test]
+    fn get_help_uses_productized_policy_mode_terms() {
+        let mut command = Cli::command();
+        let get_help = command
+            .find_subcommand_mut("get")
+            .expect("get subcommand should exist")
+            .render_long_help()
+            .to_string();
+
+        assert!(get_help.contains("Choose Human Review"));
+        assert!(get_help.contains("[default: human-review]"));
+        assert!(get_help.contains("[possible values: human-review, auto, assisted]"));
+        assert!(!get_help.contains("manual-only"));
     }
 
     #[test]

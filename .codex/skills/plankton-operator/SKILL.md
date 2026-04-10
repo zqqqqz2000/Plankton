@@ -1,33 +1,34 @@
 # Plankton Operator
 
-Use this skill when you need to run, demo, validate, or explain how to use Plankton from the local repository.
+Use this skill when you need to explain, demo, or operate Plankton from the local repository.
 
-英文为主，必要时补少量中文说明。优先告诉用户怎么用，再在最后解释原理。
+## Scope
 
-## What this skill is for
-
-- Start Plankton locally.
-- Submit and inspect requests with the CLI.
-- Use the desktop app for approval flows.
-- Demonstrate `manual-only`, `assisted`, and `auto` modes.
+- Start the local desktop UI.
+- Explain the operator workflow.
+- Use the CLI for access attempts and read-only inspection.
 - Explain provider setup for `openai_compatible`, `acp_codex`, and `claude`.
+- Keep the product contract aligned with the repository README.
 
-## Rules
+## Contract
 
-- Prefer user-facing commands over internal code walkthroughs.
-- Do not expose real secrets in examples. Use placeholders such as `...`.
-- Do not promise a provider path unless its required environment variables are present and you have verified it in the current repo state.
-- Keep explanations practical first, conceptual second.
+- Treat the desktop UI as the policy surface and the human approval surface.
+- Treat `Human Review` as the product label for the UI-only human approval mode, not as a recommended CLI approval flow.
+- Present the CLI as the operator and LLM entrypoint for `get`, `queue`, `status`, `suggestion`, and `audit`.
+- Do not present `approve` or `reject` as the normal user workflow. If they must be mentioned, label them as internal or legacy compatibility paths.
+- Keep examples practical and avoid implementation-detail tours unless the user explicitly asks for architecture or code.
+- Never expose real secrets in examples. Use placeholders such as `...`.
+- Do not claim a provider path is ready unless the required environment variables are present and the current branch has actually verified that path.
 
-## Standard workflow
+## Standard Workflow
 
-1. Work from the repo root:
+1. Work from the repository root.
 
 ```bash
 cd /Users/jpx/Documents/plankton
 ```
 
-2. First-time setup:
+2. Prepare the local environment.
 
 ```bash
 make install
@@ -36,41 +37,38 @@ mkdir -p .plankton
 make check
 ```
 
-3. Start the desktop approval console:
+3. Start the desktop UI.
 
 ```bash
 make tauri-dev
 ```
 
-4. In another terminal, submit requests:
+4. Explain the product model before showing commands.
+
+- Strategy configuration happens in the desktop UI.
+- Human approval happens in the desktop UI.
+- The CLI is for access attempts and read-only inspection around the current UI-configured strategy.
+
+5. Use the CLI for the request and inspection path.
 
 ```bash
-# Manual review
-cargo run -p plankton-cli -- get secret/api-token --reason "Manual smoke test" --requested-by alice --policy-mode manual-only
-
-# Assisted review
-cargo run -p plankton-cli -- get secret/api-token --reason "Assisted demo" --requested-by alice --policy-mode assisted
-
-# Automatic mode
-cargo run -p plankton-cli -- get secret/api-token --reason "Auto demo" --requested-by alice --policy-mode auto
-```
-
-5. Inspect or decide:
-
-```bash
+cargo run -p plankton-cli -- get secret/api-token --reason "Need readonly dev config" --requested-by alice
 cargo run -p plankton-cli -- queue
 cargo run -p plankton-cli -- status <request-id>
 cargo run -p plankton-cli -- suggestion <request-id>
 cargo run -p plankton-cli -- audit --limit 20
-cargo run -p plankton-cli -- approve <request-id> --note "approved after review"
-cargo run -p plankton-cli -- reject <request-id> --note "rejected after review"
 ```
 
-## Provider setup
+6. If asked about approval, redirect to the UI.
 
-### `manual-only`
+- Say that the desktop UI is the normal human approval path.
+- Mention `approve` or `reject` only when the user explicitly asks about legacy or internal repository behavior.
 
-No provider setup required.
+## Provider Setup
+
+### `Human Review`
+
+No provider setup is required. This is the UI-only human approval mode.
 
 ### `openai_compatible`
 
@@ -96,18 +94,12 @@ export PLANKTON_CLAUDE_API_KEY=...
 export PLANKTON_CLAUDE_MODEL=...
 ```
 
-If a provider path is still being validated on the current branch, say that clearly instead of pretending it is fully settled.  
-如果某条 provider 路径还在当前分支上验证中，要明确说明，不要假装它已经完全收稳。
+## Response Order
 
-## How to explain Plankton
+When a user asks how Plankton works, answer in this order:
 
-When a user asks how Plankton works, keep the order:
-
-1. What the user runs.
-2. What the desktop and CLI each do.
-3. Which provider mode is being used.
-4. Only then explain the principle:
-   - sanitize first
-   - suggestion before decision
-   - fail-closed guardrails
-   - shared audit trail
+1. How to launch the UI.
+2. How strategy selection and human approval are handled in the UI.
+3. How the CLI is used for `get`, `queue`, `status`, `suggestion`, and `audit`.
+4. Which provider path is relevant, if any.
+5. Only then explain the principle: sanitize first, guardrails stay authoritative, and every request stays auditable.

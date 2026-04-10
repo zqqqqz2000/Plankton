@@ -11,13 +11,16 @@ import {
   type ResolvedAutoDecisionView,
   type SuggestionTraceView,
 } from "./dashboardModel";
+import { formatElapsed, formatShortId, formatTimestamp } from "./formatters";
 import {
-  formatDecision,
-  formatElapsed,
-  formatShortId,
-  formatStatus,
-  formatTimestamp,
-} from "./formatters";
+  DEFAULT_LOCALE,
+  LOCALE_STORAGE_KEY,
+  isLocale,
+  t,
+  translateCode,
+  type Locale,
+  type TranslationKey,
+} from "./i18n";
 import "./styles.css";
 import type {
   AccessRequest,
@@ -45,6 +48,7 @@ type DetailSelection =
 
 const state: {
   dashboard: DashboardData | null;
+  locale: Locale;
   selectedDetail: DetailSelection;
   noteDraft: string;
   errorMessage: string | null;
@@ -55,6 +59,7 @@ const state: {
   pendingDecision: DecisionCommand | null;
 } = {
   dashboard: null,
+  locale: getInitialLocale(),
   selectedDetail: null,
   noteDraft: "",
   errorMessage: null,
@@ -72,6 +77,11 @@ if (!appRoot) {
 }
 
 const app: HTMLDivElement = appRoot;
+
+function getInitialLocale(): Locale {
+  const savedLocale = window.localStorage.getItem(LOCALE_STORAGE_KEY);
+  return isLocale(savedLocale) ? savedLocale : DEFAULT_LOCALE;
+}
 
 function getErrorMessage(error: unknown): string {
   if (error instanceof Error) {
@@ -107,6 +117,39 @@ function getUiStateValue(): "loading" | "refreshing" | "submitting" | "ready" {
   }
 
   return "ready";
+}
+
+function text(
+  key: TranslationKey,
+  values?: Record<string, number | string>,
+): string {
+  return t(state.locale, key, values);
+}
+
+function label(value: string): string {
+  return translateCode(state.locale, value);
+}
+
+function decisionLabel(value: string | null): string {
+  return value ? label(value) : label("pending");
+}
+
+function timestampLabel(
+  value: string | null,
+  fallbackKey: TranslationKey = "notResolved",
+): string {
+  return formatTimestamp(value, text(fallbackKey), state.locale);
+}
+
+function elapsedLabel(value: string | null): string {
+  return formatElapsed(value, Date.now(), state.locale);
+}
+
+function applyLocale(locale: Locale): void {
+  state.locale = locale;
+  window.localStorage.setItem(LOCALE_STORAGE_KEY, locale);
+  document.documentElement.lang = locale;
+  document.title = text("appTitle");
 }
 
 function getSelectedResolvedAutoDecision(
@@ -269,7 +312,7 @@ function renderAuditList(
                 data-testid="${escapeHtml(testId)}-entry-header"
               >
                 <div class="audit-row-left">
-                  ${renderBadge(formatStatus(record.action), tone, {
+                  ${renderBadge(label(record.action), tone, {
                     testId: `${testId}-action-badge`,
                     value: record.action,
                     kind: "audit_action",
@@ -277,7 +320,7 @@ function renderAuditList(
                   <strong>${escapeHtml(record.actor)}</strong>
                   ${
                     decision
-                      ? renderBadge(formatStatus(decision), tone, {
+                      ? renderBadge(label(decision), tone, {
                           testId: `${testId}-decision-badge`,
                           value: decision,
                           kind: "decision",
@@ -290,9 +333,7 @@ function renderAuditList(
                   data-testid="${escapeHtml(testId)}-entry-meta"
                 >
                   <span>${escapeHtml(formatShortId(record.request_id))}</span>
-                  <span>${escapeHtml(
-                    formatTimestamp(record.created_at, "Unknown"),
-                  )}</span>
+                  <span>${escapeHtml(timestampLabel(record.created_at, "unknown"))}</span>
                 </div>
               </div>
               ${
@@ -314,7 +355,7 @@ function renderContextBlock(request: AccessRequest): string {
   if (request.context.script_path) {
     groups.push(`
       <div class="context-group" data-testid="request-script-path-group">
-        <span class="context-label">Script</span>
+        <span class="context-label">${escapeHtml(text("script"))}</span>
         <div class="context-value" data-testid="request-fact-script-path">
           ${escapeHtml(request.context.script_path)}
         </div>
@@ -326,7 +367,7 @@ function renderContextBlock(request: AccessRequest): string {
   if (callChain) {
     groups.push(`
       <div class="context-group" data-testid="call-chain-card">
-        <span class="context-label">Call Chain</span>
+        <span class="context-label">${escapeHtml(text("callChain"))}</span>
         ${callChain}
       </div>
     `);
@@ -340,7 +381,11 @@ function renderContextBlock(request: AccessRequest): string {
     groups.push(`
       <div class="context-group" data-testid="environment-card">
         <span class="context-label" data-testid="environment-count">
-          ${Object.keys(request.context.env_vars).length} env
+          ${escapeHtml(
+            text("environmentCount", {
+              count: Object.keys(request.context.env_vars).length,
+            }),
+          )}
         </span>
         ${environment}
       </div>
@@ -355,7 +400,11 @@ function renderContextBlock(request: AccessRequest): string {
     groups.push(`
       <div class="context-group" data-testid="metadata-card">
         <span class="context-label" data-testid="metadata-count">
-          ${Object.keys(request.context.metadata).length} metadata
+          ${escapeHtml(
+            text("metadataCount", {
+              count: Object.keys(request.context.metadata).length,
+            }),
+          )}
         </span>
         ${metadata}
       </div>
@@ -372,7 +421,7 @@ function renderContextBlock(request: AccessRequest): string {
       data-testid="request-context-card"
     >
       <div class="detail-section-header">
-        <h3>Context</h3>
+        <h3>${escapeHtml(text("context"))}</h3>
       </div>
       <div class="context-stack">${groups.join("")}</div>
     </section>
@@ -393,7 +442,7 @@ function renderPromptBlock(request: AccessRequest): string {
         class="detail-section-header"
         data-testid="rendered-prompt-card-header"
       >
-        <h3>Prompt</h3>
+        <h3>${escapeHtml(text("prompt"))}</h3>
         <span data-testid="rendered-prompt-request-id">
           ${escapeHtml(formatShortId(request.id))}
         </span>
@@ -411,13 +460,13 @@ function renderSuggestionBlock(suggestion: LlmSuggestion | null): string {
   }
 
   const providerLabel = suggestion.provider_model
-    ? `${suggestion.provider_kind} / ${suggestion.provider_model}`
-    : suggestion.provider_kind;
+    ? `${label(suggestion.provider_kind)} / ${suggestion.provider_model}`
+    : label(suggestion.provider_kind);
 
   const detailParts = [
     providerLabel,
-    `template v${suggestion.template_version}`,
-    formatTimestamp(suggestion.generated_at, "Unknown"),
+    text("templateVersion", { version: suggestion.template_version }),
+    timestampLabel(suggestion.generated_at, "unknown"),
   ];
 
   return `
@@ -429,14 +478,14 @@ function renderSuggestionBlock(suggestion: LlmSuggestion | null): string {
         class="detail-section-header"
         data-testid="llm-suggestion-card-header"
       >
-        <h3>Suggestion</h3>
+        <h3>${escapeHtml(text("suggestion"))}</h3>
         <span data-testid="llm-suggestion-provider">
           ${escapeHtml(providerLabel)}
         </span>
       </div>
       <div class="badge-row" data-testid="llm-suggestion-badges">
         ${renderBadge(
-          formatStatus(suggestion.suggested_decision),
+          label(suggestion.suggested_decision),
           getDecisionTone(suggestion.suggested_decision),
           {
             testId: "llm-suggestion-decision",
@@ -444,11 +493,15 @@ function renderSuggestionBlock(suggestion: LlmSuggestion | null): string {
             kind: "suggested_decision",
           },
         )}
-        ${renderBadge(`Risk ${suggestion.risk_score}`, "neutral", {
-          testId: "llm-suggestion-risk",
-          value: String(suggestion.risk_score),
-          kind: "risk_score",
-        })}
+        ${renderBadge(
+          text("riskLabel", { score: suggestion.risk_score }),
+          "neutral",
+          {
+            testId: "llm-suggestion-risk",
+            value: String(suggestion.risk_score),
+            kind: "risk_score",
+          },
+        )}
       </div>
       <p class="suggestion-summary" data-testid="llm-suggestion-rationale">
         ${escapeHtml(suggestion.rationale_summary)}
@@ -505,7 +558,7 @@ function renderAcpTraceBlock(traceView: SuggestionTraceView | null): string {
       ? `${providerTrace.package_name} ${providerTrace.package_version}`
       : (providerTrace?.package_name ??
         providerTrace?.package_version ??
-        "Unknown");
+        text("unknown"));
 
   return `
     <section
@@ -517,18 +570,22 @@ function renderAcpTraceBlock(traceView: SuggestionTraceView | null): string {
         class="detail-section-header"
         data-testid="acp-provider-trace-card-header"
       >
-        <h3>ACP Trace</h3>
+        <h3>${escapeHtml(text("acpTrace"))}</h3>
         <span data-testid="acp-provider-model">
-          ${escapeHtml(traceView.provider_model ?? "n/a")}
+          ${escapeHtml(traceView.provider_model ?? text("notAvailable"))}
         </span>
       </div>
       <div class="badge-row" data-testid="acp-provider-trace-badges">
-        ${renderBadge(traceView.provider_kind ?? "acp_codex", "neutral", {
-          testId: "acp-provider-kind",
-          value: traceView.provider_kind ?? "acp_codex",
-          kind: "provider_kind",
-        })}
-        ${renderBadge(providerTrace?.transport ?? "unknown", "neutral", {
+        ${renderBadge(
+          label(traceView.provider_kind ?? "acp_codex"),
+          "neutral",
+          {
+            testId: "acp-provider-kind",
+            value: traceView.provider_kind ?? "acp_codex",
+            kind: "provider_kind",
+          },
+        )}
+        ${renderBadge(providerTrace?.transport ?? text("unknown"), "neutral", {
           testId: "acp-transport",
           value: providerTrace?.transport ?? "unknown",
           kind: "acp_transport",
@@ -545,24 +602,26 @@ function renderAcpTraceBlock(traceView: SuggestionTraceView | null): string {
       </div>
       <dl class="facts" data-testid="acp-provider-trace-facts">
         <div data-testid="acp-trace-session-id">
-          <dt>Session</dt>
-          <dd>${escapeHtml(providerTrace?.session_id ?? "n/a")}</dd>
+          <dt>${escapeHtml(text("session"))}</dt>
+          <dd>${escapeHtml(providerTrace?.session_id ?? text("notAvailable"))}</dd>
         </div>
         <div data-testid="acp-trace-agent-name">
-          <dt>Agent Name</dt>
-          <dd>${escapeHtml(providerTrace?.agent_name ?? "n/a")}</dd>
+          <dt>${escapeHtml(text("agentName"))}</dt>
+          <dd>${escapeHtml(providerTrace?.agent_name ?? text("notAvailable"))}</dd>
         </div>
         <div data-testid="acp-trace-agent-version">
-          <dt>Agent Version</dt>
-          <dd>${escapeHtml(providerTrace?.agent_version ?? "n/a")}</dd>
+          <dt>${escapeHtml(text("agentVersion"))}</dt>
+          <dd>${escapeHtml(providerTrace?.agent_version ?? text("notAvailable"))}</dd>
         </div>
         <div data-testid="acp-trace-package">
-          <dt>Package</dt>
+          <dt>${escapeHtml(text("package"))}</dt>
           <dd>${escapeHtml(packageLabel)}</dd>
         </div>
         <div data-testid="acp-trace-client-request-id">
-          <dt>Client Request</dt>
-          <dd>${escapeHtml(providerTrace?.client_request_id ?? "n/a")}</dd>
+          <dt>${escapeHtml(text("clientRequest"))}</dt>
+          <dd>${escapeHtml(
+            providerTrace?.client_request_id ?? text("notAvailable"),
+          )}</dd>
         </div>
       </dl>
     </section>
@@ -599,13 +658,13 @@ function renderClaudeTraceBlock(traceView: SuggestionTraceView | null): string {
         class="detail-section-header"
         data-testid="claude-provider-trace-card-header"
       >
-        <h3>Claude Trace</h3>
+        <h3>${escapeHtml(text("claudeTrace"))}</h3>
         <span data-testid="claude-provider-model">
-          ${escapeHtml(traceView.provider_model ?? "n/a")}
+          ${escapeHtml(traceView.provider_model ?? text("notAvailable"))}
         </span>
       </div>
       <div class="badge-row" data-testid="claude-provider-trace-badges">
-        ${renderBadge(traceView.provider_kind ?? "claude", "neutral", {
+        ${renderBadge(label(traceView.provider_kind ?? "claude"), "neutral", {
           testId: "claude-provider-kind",
           value: traceView.provider_kind ?? "claude",
           kind: "provider_kind",
@@ -621,7 +680,7 @@ function renderClaudeTraceBlock(traceView: SuggestionTraceView | null): string {
         }
         ${
           providerTrace?.stop_reason
-            ? renderBadge(formatStatus(providerTrace.stop_reason), "neutral", {
+            ? renderBadge(label(providerTrace.stop_reason), "neutral", {
                 testId: "claude-stop-reason",
                 value: providerTrace.stop_reason,
                 kind: "stop_reason",
@@ -631,28 +690,30 @@ function renderClaudeTraceBlock(traceView: SuggestionTraceView | null): string {
       </div>
       <dl class="facts" data-testid="claude-provider-trace-facts">
         <div data-testid="claude-trace-response-id">
-          <dt>Response</dt>
-          <dd>${escapeHtml(traceView.provider_response_id ?? "n/a")}</dd>
+          <dt>${escapeHtml(text("response"))}</dt>
+          <dd>${escapeHtml(traceView.provider_response_id ?? text("notAvailable"))}</dd>
         </div>
         <div data-testid="claude-trace-request-id">
-          <dt>Request</dt>
-          <dd>${escapeHtml(traceView.x_request_id ?? "n/a")}</dd>
+          <dt>${escapeHtml(text("request"))}</dt>
+          <dd>${escapeHtml(traceView.x_request_id ?? text("notAvailable"))}</dd>
         </div>
         <div data-testid="claude-trace-total-tokens">
-          <dt>Total Tokens</dt>
+          <dt>${escapeHtml(text("totalTokens"))}</dt>
           <dd>${escapeHtml(
             traceView.usage_total_tokens === null
-              ? "n/a"
+              ? text("notAvailable")
               : String(traceView.usage_total_tokens),
           )}</dd>
         </div>
         <div data-testid="claude-trace-api-version">
-          <dt>API Version</dt>
-          <dd>${escapeHtml(providerTrace?.api_version ?? "n/a")}</dd>
+          <dt>${escapeHtml(text("apiVersion"))}</dt>
+          <dd>${escapeHtml(providerTrace?.api_version ?? text("notAvailable"))}</dd>
         </div>
         <div data-testid="claude-trace-output-format">
-          <dt>Output</dt>
-          <dd>${escapeHtml(providerTrace?.output_format ?? "n/a")}</dd>
+          <dt>${escapeHtml(text("output"))}</dt>
+          <dd>${escapeHtml(
+            providerTrace?.output_format ?? text("notAvailable"),
+          )}</dd>
         </div>
       </dl>
     </section>
@@ -668,10 +729,10 @@ function renderAutomaticDecisionBlock(
 
   const guardrailHints: string[] = [];
   if (automaticDecision.secret_exposure_risk) {
-    guardrailHints.push("secret exposure risk");
+    guardrailHints.push(text("secretExposureRisk"));
   }
   if (automaticDecision.fail_closed) {
-    guardrailHints.push("fail closed");
+    guardrailHints.push(text("failClosed"));
   }
 
   return `
@@ -685,14 +746,14 @@ function renderAutomaticDecisionBlock(
         class="detail-section-header"
         data-testid="automatic-decision-card-header"
       >
-        <h3>Automatic Result</h3>
+        <h3>${escapeHtml(text("automaticResult"))}</h3>
         <span data-testid="automatic-decision-evaluated-at">
-          ${escapeHtml(formatTimestamp(automaticDecision.evaluated_at, "Unknown"))}
+          ${escapeHtml(timestampLabel(automaticDecision.evaluated_at, "unknown"))}
         </span>
       </div>
       <div class="badge-row" data-testid="automatic-decision-badges">
         ${renderBadge(
-          formatStatus(automaticDecision.auto_disposition),
+          label(automaticDecision.auto_disposition),
           getDecisionTone(automaticDecision.auto_disposition),
           {
             testId: "automatic-decision-disposition",
@@ -700,19 +761,15 @@ function renderAutomaticDecisionBlock(
             kind: "auto_disposition",
           },
         )}
-        ${renderBadge(
-          formatStatus(automaticDecision.decision_source),
-          "neutral",
-          {
-            testId: "automatic-decision-source",
-            value: automaticDecision.decision_source,
-            kind: "decision_source",
-          },
-        )}
+        ${renderBadge(label(automaticDecision.decision_source), "neutral", {
+          testId: "automatic-decision-source",
+          value: automaticDecision.decision_source,
+          kind: "decision_source",
+        })}
         ${renderBadge(
           automaticDecision.provider_called
-            ? "Provider Called"
-            : "Provider Skipped",
+            ? text("providerCalled")
+            : text("providerSkipped"),
           automaticDecision.provider_called ? "neutral" : "pending",
           {
             testId: "automatic-decision-provider-called",
@@ -722,7 +779,7 @@ function renderAutomaticDecisionBlock(
         )}
         ${
           automaticDecision.secret_exposure_risk
-            ? renderBadge("Secret Exposure Risk", "rejected", {
+            ? renderBadge(text("secretExposureRisk"), "rejected", {
                 testId: "automatic-decision-secret-exposure-risk",
                 value: "true",
                 kind: "guardrail",
@@ -765,16 +822,22 @@ function renderAutomaticDecisionBlock(
 }
 
 function getResolvedAutoTitle(entry: ResolvedAutoDecisionView): string {
-  return entry.resource ?? `Request ${formatShortId(entry.request_id)}`;
+  return (
+    entry.resource ?? `${text("request")} ${formatShortId(entry.request_id)}`
+  );
 }
 
 function renderQueue(selectedRequestId: string | null): string {
   if (state.isLoading && !state.dashboard) {
-    return '<p class="empty" data-testid="pending-queue-loading">Loading queue</p>';
+    return `<p class="empty" data-testid="pending-queue-loading">${escapeHtml(
+      text("loadingQueue"),
+    )}</p>`;
   }
 
   if (!state.dashboard || state.dashboard.pending_requests.length === 0) {
-    return '<p class="empty" data-testid="pending-queue-empty">No pending requests</p>';
+    return `<p class="empty" data-testid="pending-queue-empty">${escapeHtml(
+      text("noPendingRequests"),
+    )}</p>`;
   }
 
   return state.dashboard.pending_requests
@@ -789,12 +852,14 @@ function renderQueue(selectedRequestId: string | null): string {
           data-request-id="${escapeHtml(request.id)}"
           data-selected="${isActive ? "true" : "false"}"
           aria-pressed="${isActive ? "true" : "false"}"
-          aria-label="Select request ${escapeHtml(request.id)}"
+          aria-label="${escapeHtml(
+            text("selectRequestAria", { id: request.id }),
+          )}"
           type="button"
         >
           <div class="queue-item-header" data-testid="queue-item-header">
             <strong>${escapeHtml(request.context.resource)}</strong>
-            ${renderBadge(formatStatus(request.approval_status), "pending", {
+            ${renderBadge(label(request.approval_status), "pending", {
               testId: "queue-item-status",
               value: request.approval_status,
               kind: "approval_status",
@@ -803,7 +868,7 @@ function renderQueue(selectedRequestId: string | null): string {
           <p class="queue-item-reason">${escapeHtml(request.context.reason)}</p>
           <div class="queue-item-meta" data-testid="queue-item-meta">
             <span>${escapeHtml(request.context.requested_by)}</span>
-            <span>${escapeHtml(formatElapsed(request.created_at))}</span>
+            <span>${escapeHtml(elapsedLabel(request.created_at))}</span>
           </div>
         </button>
       `;
@@ -816,7 +881,9 @@ function renderResolvedAutoList(
   selectedRequestId: string | null,
 ): string {
   if (entries.length === 0) {
-    return '<p class="empty" data-testid="resolved-auto-results-empty">No recent auto results</p>';
+    return `<p class="empty" data-testid="resolved-auto-results-empty">${escapeHtml(
+      text("noRecentAutoResults"),
+    )}</p>`;
   }
 
   return entries
@@ -833,13 +900,15 @@ function renderResolvedAutoList(
           data-request-id="${escapeHtml(entry.request_id)}"
           data-selected="${isActive ? "true" : "false"}"
           aria-pressed="${isActive ? "true" : "false"}"
-          aria-label="Select automatic result ${escapeHtml(entry.request_id)}"
+          aria-label="${escapeHtml(
+            text("selectAutoResultAria", { id: entry.request_id }),
+          )}"
           type="button"
         >
           <div class="queue-item-header" data-testid="resolved-auto-item-header">
             <strong>${escapeHtml(getResolvedAutoTitle(entry))}</strong>
             ${renderBadge(
-              formatStatus(entry.automatic_decision.auto_disposition),
+              label(entry.automatic_decision.auto_disposition),
               getDecisionTone(entry.automatic_decision.auto_disposition),
               {
                 testId: "resolved-auto-item-status",
@@ -856,8 +925,8 @@ function renderResolvedAutoList(
               : ""
           }
           <div class="queue-item-meta" data-testid="resolved-auto-item-meta">
-            <span>${escapeHtml(entry.requested_by ?? "system")}</span>
-            <span>${escapeHtml(formatElapsed(entry.recorded_at))}</span>
+            <span>${escapeHtml(entry.requested_by ?? text("system"))}</span>
+            <span>${escapeHtml(elapsedLabel(entry.recorded_at))}</span>
           </div>
         </button>
       `;
@@ -869,7 +938,7 @@ function renderRequestDetail(selectedRequest: AccessRequest | null): string {
   if (!selectedRequest) {
     return `
       <div class="detail-empty-state" data-testid="request-detail-empty-state">
-        <h2>No pending request</h2>
+        <h2>${escapeHtml(text("noPendingRequest"))}</h2>
       </div>
     `;
   }
@@ -879,9 +948,13 @@ function renderRequestDetail(selectedRequest: AccessRequest | null): string {
     selectedRequest.id,
   );
   const approveLabel =
-    state.pendingDecision === "approve_request" ? "Approving..." : "Approve";
+    state.pendingDecision === "approve_request"
+      ? text("approving")
+      : text("approve");
   const rejectLabel =
-    state.pendingDecision === "reject_request" ? "Rejecting..." : "Reject";
+    state.pendingDecision === "reject_request"
+      ? text("rejecting")
+      : text("reject");
   const suggestionTrace = selectedRequest.llm_suggestion
     ? {
         provider_kind: selectedRequest.llm_suggestion.provider_kind,
@@ -907,7 +980,7 @@ function renderRequestDetail(selectedRequest: AccessRequest | null): string {
             ${escapeHtml(selectedRequest.context.requested_by)}
           </span>
           <span data-testid="request-opened-at">
-            ${escapeHtml(formatElapsed(selectedRequest.created_at))}
+            ${escapeHtml(elapsedLabel(selectedRequest.created_at))}
           </span>
           <span class="id-pill" data-testid="request-id-pill">
             ${escapeHtml(formatShortId(selectedRequest.id))}
@@ -915,17 +988,13 @@ function renderRequestDetail(selectedRequest: AccessRequest | null): string {
         </div>
       </div>
       <div class="badge-row" data-testid="request-detail-badges">
+        ${renderBadge(label(selectedRequest.approval_status), "pending", {
+          testId: "request-approval-status",
+          value: selectedRequest.approval_status,
+          kind: "approval_status",
+        })}
         ${renderBadge(
-          formatStatus(selectedRequest.approval_status),
-          "pending",
-          {
-            testId: "request-approval-status",
-            value: selectedRequest.approval_status,
-            kind: "approval_status",
-          },
-        )}
-        ${renderBadge(
-          formatDecision(selectedRequest.final_decision),
+          decisionLabel(selectedRequest.final_decision),
           getDecisionTone(selectedRequest.final_decision),
           {
             testId: "request-final-decision",
@@ -947,18 +1016,20 @@ function renderRequestDetail(selectedRequest: AccessRequest | null): string {
           class="detail-section-header"
           data-testid="review-decision-card-header"
         >
-          <h3>Decision</h3>
+          <h3>${escapeHtml(text("decision"))}</h3>
           <span data-testid="review-sync-timestamp">
-            ${escapeHtml(formatTimestamp(state.lastUpdatedAt, "Pending sync"))}
+            ${escapeHtml(timestampLabel(state.lastUpdatedAt, "pendingSync"))}
           </span>
         </div>
-        <label class="field-label" for="decisionNote">Note</label>
+        <label class="field-label" for="decisionNote">${escapeHtml(
+          text("note"),
+        )}</label>
         <textarea
           id="decisionNote"
           class="note-field"
           data-testid="decision-note-input"
-          placeholder="Optional note"
-          aria-label="Audit note"
+          placeholder="${escapeHtml(text("notePlaceholder"))}"
+          aria-label="${escapeHtml(text("auditNoteAria"))}"
           ${state.isSubmitting ? "disabled" : ""}
         >${escapeHtml(state.noteDraft)}</textarea>
         <div class="actions" data-testid="decision-actions">
@@ -968,7 +1039,7 @@ function renderRequestDetail(selectedRequest: AccessRequest | null): string {
             data-decision="approve_request"
             data-request-id="${escapeHtml(selectedRequest.id)}"
             data-testid="approve-request-button"
-            aria-label="Approve selected request"
+            aria-label="${escapeHtml(text("approveSelectedAria"))}"
             type="button"
             ${state.isSubmitting ? "disabled" : ""}
           >
@@ -980,7 +1051,7 @@ function renderRequestDetail(selectedRequest: AccessRequest | null): string {
             data-decision="reject_request"
             data-request-id="${escapeHtml(selectedRequest.id)}"
             data-testid="reject-request-button"
-            aria-label="Reject selected request"
+            aria-label="${escapeHtml(text("rejectSelectedAria"))}"
             type="button"
             ${state.isSubmitting ? "disabled" : ""}
           >
@@ -997,30 +1068,34 @@ function renderRequestDetail(selectedRequest: AccessRequest | null): string {
           class="detail-section-header"
           data-testid="request-facts-card-header"
         >
-          <h3>Summary</h3>
+          <h3>${escapeHtml(text("summary"))}</h3>
           <span
             data-testid="request-policy-mode"
             data-value="${escapeHtml(selectedRequest.policy_mode)}"
           >
-            ${escapeHtml(formatStatus(selectedRequest.policy_mode))}
+            ${escapeHtml(label(selectedRequest.policy_mode))}
           </span>
         </div>
         <dl class="facts" data-testid="request-facts-list">
           <div data-testid="request-fact-created">
-            <dt>Created</dt>
-            <dd>${escapeHtml(formatTimestamp(selectedRequest.created_at, "Unknown"))}</dd>
+            <dt>${escapeHtml(text("created"))}</dt>
+            <dd>${escapeHtml(timestampLabel(selectedRequest.created_at, "unknown"))}</dd>
           </div>
           <div data-testid="request-fact-resolved">
-            <dt>Resolved</dt>
-            <dd>${escapeHtml(formatTimestamp(selectedRequest.resolved_at))}</dd>
+            <dt>${escapeHtml(text("resolved"))}</dt>
+            <dd>${escapeHtml(timestampLabel(selectedRequest.resolved_at))}</dd>
           </div>
           <div data-testid="request-provider-kind">
-            <dt>Provider</dt>
-            <dd>${escapeHtml(selectedRequest.provider_kind ?? "n/a")}</dd>
+            <dt>${escapeHtml(text("provider"))}</dt>
+            <dd>${escapeHtml(
+              selectedRequest.provider_kind
+                ? label(selectedRequest.provider_kind)
+                : text("notAvailable"),
+            )}</dd>
           </div>
           <div data-testid="request-fact-updated">
-            <dt>Updated</dt>
-            <dd>${escapeHtml(formatTimestamp(selectedRequest.updated_at, "Unknown"))}</dd>
+            <dt>${escapeHtml(text("updated"))}</dt>
+            <dd>${escapeHtml(timestampLabel(selectedRequest.updated_at, "unknown"))}</dd>
           </div>
         </dl>
       </section>
@@ -1038,14 +1113,16 @@ function renderRequestDetail(selectedRequest: AccessRequest | null): string {
           class="detail-section-header"
           data-testid="request-audit-card-header"
         >
-          <h3>Request Audit</h3>
+          <h3>${escapeHtml(text("requestAudit"))}</h3>
           <span data-testid="request-audit-count">
-            ${selectedAuditRecords.length} event(s)
+            ${escapeHtml(
+              text("eventCount", { count: selectedAuditRecords.length }),
+            )}
           </span>
         </div>
         ${renderAuditList(
           selectedAuditRecords,
-          "No request audit",
+          text("noRequestAudit"),
           "request-audit-list",
         )}
       </section>
@@ -1061,7 +1138,7 @@ function renderResolvedAutoDetail(
   if (!selectedResult) {
     return `
       <div class="detail-empty-state" data-testid="request-detail-empty-state">
-        <h2>No pending request</h2>
+        <h2>${escapeHtml(text("noPendingRequest"))}</h2>
       </div>
     `;
   }
@@ -1072,9 +1149,11 @@ function renderResolvedAutoDetail(
   );
   const providerLabel = selectedResult.automatic_decision.provider_called
     ? selectedResult.automatic_decision.provider_model
-      ? `${selectedResult.automatic_decision.provider_kind ?? "provider"} / ${selectedResult.automatic_decision.provider_model}`
-      : (selectedResult.automatic_decision.provider_kind ?? "provider")
-    : "Skipped";
+      ? `${selectedResult.automatic_decision.provider_kind ? label(selectedResult.automatic_decision.provider_kind) : text("provider")} / ${selectedResult.automatic_decision.provider_model}`
+      : selectedResult.automatic_decision.provider_kind
+        ? label(selectedResult.automatic_decision.provider_kind)
+        : text("provider")
+    : text("providerSkipped");
   const decisionValue =
     selectedResult.final_decision ??
     selectedResult.automatic_decision.auto_disposition;
@@ -1099,10 +1178,10 @@ function renderResolvedAutoDetail(
         }
         <div class="detail-meta" data-testid="resolved-auto-detail-overview">
           <span data-testid="resolved-auto-requester">
-            ${escapeHtml(selectedResult.requested_by ?? "system")}
+            ${escapeHtml(selectedResult.requested_by ?? text("system"))}
           </span>
           <span data-testid="resolved-auto-recorded-at">
-            ${escapeHtml(formatElapsed(selectedResult.recorded_at))}
+            ${escapeHtml(elapsedLabel(selectedResult.recorded_at))}
           </span>
           <span class="id-pill" data-testid="resolved-auto-request-id-pill">
             ${escapeHtml(formatShortId(selectedResult.request_id))}
@@ -1110,13 +1189,13 @@ function renderResolvedAutoDetail(
         </div>
       </div>
       <div class="badge-row" data-testid="resolved-auto-detail-badges">
-        ${renderBadge(formatStatus(statusValue), getDecisionTone(statusValue), {
+        ${renderBadge(label(statusValue), getDecisionTone(statusValue), {
           testId: "resolved-auto-approval-status",
           value: statusValue,
           kind: "approval_status",
         })}
         ${renderBadge(
-          formatDecision(decisionValue),
+          decisionLabel(decisionValue),
           getDecisionTone(decisionValue),
           {
             testId: "resolved-auto-final-decision",
@@ -1138,30 +1217,30 @@ function renderResolvedAutoDetail(
           class="detail-section-header"
           data-testid="resolved-auto-summary-card-header"
         >
-          <h3>Summary</h3>
+          <h3>${escapeHtml(text("summary"))}</h3>
           <span data-testid="resolved-auto-decision-source">
-            ${escapeHtml(formatStatus(selectedResult.automatic_decision.decision_source))}
+            ${escapeHtml(label(selectedResult.automatic_decision.decision_source))}
           </span>
         </div>
         <dl class="facts" data-testid="resolved-auto-facts-list">
           <div data-testid="resolved-auto-fact-submitted">
-            <dt>Submitted</dt>
-            <dd>${escapeHtml(formatTimestamp(selectedResult.submitted_at, "Unknown"))}</dd>
+            <dt>${escapeHtml(text("submitted"))}</dt>
+            <dd>${escapeHtml(timestampLabel(selectedResult.submitted_at, "unknown"))}</dd>
           </div>
           <div data-testid="resolved-auto-fact-recorded">
-            <dt>Recorded</dt>
-            <dd>${escapeHtml(formatTimestamp(selectedResult.recorded_at, "Unknown"))}</dd>
+            <dt>${escapeHtml(text("recorded"))}</dt>
+            <dd>${escapeHtml(timestampLabel(selectedResult.recorded_at, "unknown"))}</dd>
           </div>
           <div data-testid="resolved-auto-fact-provider">
-            <dt>Provider</dt>
+            <dt>${escapeHtml(text("provider"))}</dt>
             <dd>${escapeHtml(providerLabel)}</dd>
           </div>
           <div data-testid="resolved-auto-fact-guardrail">
-            <dt>Guardrail</dt>
+            <dt>${escapeHtml(text("guardrail"))}</dt>
             <dd>${escapeHtml(
               selectedResult.automatic_decision.secret_exposure_risk
-                ? "Secret exposure risk"
-                : "n/a",
+                ? text("secretExposureRisk")
+                : text("guardrailNone"),
             )}</dd>
           </div>
         </dl>
@@ -1178,14 +1257,16 @@ function renderResolvedAutoDetail(
           class="detail-section-header"
           data-testid="resolved-auto-audit-card-header"
         >
-          <h3>Request Audit</h3>
+          <h3>${escapeHtml(text("requestAudit"))}</h3>
           <span data-testid="resolved-auto-audit-count">
-            ${selectedAuditRecords.length} event(s)
+            ${escapeHtml(
+              text("eventCount", { count: selectedAuditRecords.length }),
+            )}
           </span>
         </div>
         ${renderAuditList(
           selectedAuditRecords,
-          "No request audit",
+          text("noRequestAudit"),
           "resolved-auto-audit-list",
         )}
       </section>
@@ -1194,6 +1275,9 @@ function renderResolvedAutoDetail(
 }
 
 function render(): void {
+  document.documentElement.lang = state.locale;
+  document.title = text("appTitle");
+
   const resolvedAutoEntries = getResolvedAutoDecisionEntries(
     state.dashboard?.recent_audit_records ?? [],
   );
@@ -1225,16 +1309,43 @@ function render(): void {
     >
       <header class="toolbar" data-testid="console-hero">
         <div class="toolbar-title">
-          <h1>Approvals</h1>
+          <h1>${escapeHtml(text("toolbarTitle"))}</h1>
           <span
             class="toolbar-count"
             data-testid="pending-queue-count"
             data-queue-count="${summary.pendingCount}"
           >
-            ${summary.pendingCount} open
+            ${escapeHtml(text("openCount", { count: summary.pendingCount }))}
           </span>
         </div>
         <div class="toolbar-actions">
+          <div
+            class="locale-switch"
+            data-testid="locale-switcher"
+            role="group"
+            aria-label="${escapeHtml(text("localeSwitchAria"))}"
+          >
+            <button
+              class="ghost locale-button ${state.locale === "en" ? "active" : ""}"
+              data-locale="en"
+              data-testid="locale-button-en"
+              type="button"
+              aria-pressed="${state.locale === "en" ? "true" : "false"}"
+            >
+              EN
+            </button>
+            <button
+              class="ghost locale-button ${
+                state.locale === "zh-CN" ? "active" : ""
+              }"
+              data-locale="zh-CN"
+              data-testid="locale-button-zh"
+              type="button"
+              aria-pressed="${state.locale === "zh-CN" ? "true" : "false"}"
+            >
+              中文
+            </button>
+          </div>
           <div
             class="hero-status"
             data-testid="sync-status"
@@ -1244,10 +1355,10 @@ function render(): void {
           >
             ${renderBadge(
               state.isSubmitting
-                ? "Submitting"
+                ? text("syncSubmitting")
                 : state.isRefreshing
-                  ? "Refreshing"
-                  : "Ready",
+                  ? text("syncRefreshing")
+                  : text("syncReady"),
               state.isSubmitting || state.isRefreshing ? "pending" : "neutral",
               {
                 testId: "sync-status-badge",
@@ -1256,18 +1367,18 @@ function render(): void {
               },
             )}
             <span data-testid="sync-timestamp">
-              ${escapeHtml(formatTimestamp(state.lastUpdatedAt, "Waiting"))}
+              ${escapeHtml(timestampLabel(state.lastUpdatedAt, "waiting"))}
             </span>
           </div>
           <button
             id="refreshButton"
             class="ghost"
             data-testid="refresh-queue-button"
-            aria-label="Refresh approval queue"
+            aria-label="${escapeHtml(text("refreshQueueAria"))}"
             type="button"
             ${state.isSubmitting ? "disabled" : ""}
           >
-            Refresh
+            ${escapeHtml(text("refresh"))}
           </button>
         </div>
       </header>
@@ -1288,10 +1399,10 @@ function render(): void {
                 id="dismissError"
                 class="ghost"
                 data-testid="dismiss-error-button"
-                aria-label="Dismiss sync error"
+                aria-label="${escapeHtml(text("dismissErrorAria"))}"
                 type="button"
               >
-                Dismiss
+                ${escapeHtml(text("dismiss"))}
               </button>
             </section>
           `
@@ -1303,7 +1414,7 @@ function render(): void {
           <div class="panel-stack" data-testid="sidebar-stack">
             <section class="panel-section" data-testid="pending-queue-section">
               <div class="panel-header" data-testid="pending-queue-header">
-                <h2>Queue</h2>
+                <h2>${escapeHtml(text("queue"))}</h2>
                 <span data-testid="pending-queue-requester-count">
                   ${summary.pendingCount}
                 </span>
@@ -1325,7 +1436,7 @@ function render(): void {
                 class="panel-header"
                 data-testid="resolved-auto-results-header"
               >
-                <h2>Auto Results</h2>
+                <h2>${escapeHtml(text("autoResults"))}</h2>
                 <span data-testid="resolved-auto-results-count">
                   ${resolvedAutoEntries.length}
                 </span>
@@ -1357,12 +1468,12 @@ function render(): void {
 
       <section class="panel audit-panel" data-testid="global-audit-panel">
         <div class="panel-header" data-testid="global-audit-header">
-          <h2>Audit</h2>
+          <h2>${escapeHtml(text("audit"))}</h2>
           <span data-testid="global-audit-count">${summary.auditCount}</span>
         </div>
         ${renderAuditList(
           state.dashboard?.recent_audit_records ?? [],
-          "No audit events",
+          text("noAuditEvents"),
           "global-audit-list",
         )}
       </section>
@@ -1373,6 +1484,20 @@ function render(): void {
 }
 
 function bindEvents(): void {
+  document
+    .querySelectorAll<HTMLButtonElement>("[data-locale]")
+    .forEach((element) => {
+      element.addEventListener("click", () => {
+        const locale = element.dataset.locale ?? null;
+        if (!isLocale(locale) || locale === state.locale) {
+          return;
+        }
+
+        applyLocale(locale);
+        render();
+      });
+    });
+
   document.querySelector("#refreshButton")?.addEventListener("click", () => {
     void loadDashboard();
   });
@@ -1462,11 +1587,15 @@ async function decide(
   decision: DecisionCommand,
 ): Promise<void> {
   const selectedRequest = getSelectedRequest(state.dashboard, requestId);
-  const action = decision === "approve_request" ? "Approve" : "Reject";
+  const action =
+    decision === "approve_request" ? text("approve") : text("reject");
 
   if (
     !window.confirm(
-      `${action} ${selectedRequest?.context.resource ?? requestId}?`,
+      text("confirmDecision", {
+        action,
+        resource: selectedRequest?.context.resource ?? requestId,
+      }),
     )
   ) {
     return;
@@ -1493,6 +1622,7 @@ async function decide(
   }
 }
 
+applyLocale(state.locale);
 render();
 void loadDashboard();
 window.setInterval(() => {

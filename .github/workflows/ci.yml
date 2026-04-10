@@ -1,0 +1,68 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  rust:
+    name: Rust Crates
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust build outputs
+        uses: Swatinem/rust-cache@v2
+
+      - name: Check Rust formatting
+        run: cargo fmt --all -- --check
+
+      - name: Check releasable Rust crates
+        run: cargo check --locked -p plankton-core -p plankton-store -p plankton-cli
+
+      - name: Test releasable Rust crates
+        run: cargo test --locked -p plankton-core -p plankton-store -p plankton-cli -- --nocapture
+
+  desktop:
+    name: Desktop Frontend
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: apps/desktop/package-lock.json
+
+      - name: Install desktop dependencies
+        run: npm --prefix apps/desktop ci
+
+      - name: Check desktop formatting
+        run: npm --prefix apps/desktop run format
+
+      - name: Check desktop types
+        run: npm --prefix apps/desktop run typecheck
+
+      - name: Run desktop tests
+        run: npm --prefix apps/desktop run test
+
+      - name: Build desktop frontend
+        run: npm --prefix apps/desktop run build

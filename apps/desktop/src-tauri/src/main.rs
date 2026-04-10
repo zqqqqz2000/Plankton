@@ -1,20 +1,66 @@
+use std::sync::Mutex;
+
 use anyhow::{Context, Result};
-use plankton_core::{load_settings, AccessRequest, DashboardData, Decision, PlanktonSettings};
+use plankton_core::{
+    load_settings, save_user_default_policy_mode, AccessRequest, DashboardData, Decision,
+    PlanktonSettings, PolicyMode,
+};
+use serde::Serialize;
 use plankton_store::SqliteStore;
 use tauri::State;
 
 struct AppState {
-    settings: PlanktonSettings,
+    settings: Mutex<PlanktonSettings>,
     store: SqliteStore,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct DesktopPreferences {
+    default_policy_mode: PolicyMode,
+}
+
+fn lock_settings(state: &State<'_, AppState>) -> Result<std::sync::MutexGuard<'_, PlanktonSettings>, String> {
+    state
+        .settings
+        .lock()
+        .map_err(|_| "failed to lock desktop settings".to_string())
 }
 
 #[tauri::command]
 async fn dashboard(state: State<'_, AppState>) -> Result<DashboardData, String> {
+    let recent_audit_limit = {
+        let settings = lock_settings(&state)?;
+        settings.recent_audit_limit
+    };
+
     state
         .store
-        .dashboard(state.settings.recent_audit_limit)
+        .dashboard(recent_audit_limit)
         .await
         .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+async fn desktop_preferences(state: State<'_, AppState>) -> Result<DesktopPreferences, String> {
+    let settings = lock_settings(&state)?;
+    Ok(DesktopPreferences {
+        default_policy_mode: settings.default_policy_mode,
+    })
+}
+
+#[tauri::command]
+async fn set_default_policy_mode(
+    policy_mode: PolicyMode,
+    state: State<'_, AppState>,
+) -> Result<DesktopPreferences, String> {
+    save_user_default_policy_mode(policy_mode).map_err(|error| error.to_string())?;
+
+    let mut settings = lock_settings(&state)?;
+    settings.default_policy_mode = policy_mode;
+
+    Ok(DesktopPreferences {
+        default_policy_mode: settings.default_policy_mode,
+    })
 }
 
 #[tauri::command]
@@ -57,9 +103,14 @@ fn run() -> Result<()> {
 
     tauri::Builder::default()
         .plugin(tauri_plugin_log::Builder::default().build())
-        .manage(AppState { settings, store })
+        .manage(AppState {
+            settings: Mutex::new(settings),
+            store,
+        })
         .invoke_handler(tauri::generate_handler![
             dashboard,
+            desktop_preferences,
+            set_default_policy_mode,
             approve_request,
             reject_request
         ])

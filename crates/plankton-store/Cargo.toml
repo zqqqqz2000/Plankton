@@ -1,8 +1,11 @@
 [package]
 name = "plankton-store"
+description = "SQLite persistence and read models for Plankton requests and audits"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+homepage.workspace = true
+repository.workspace = true
 
 [dependencies]
 plankton-core = { path = "../plankton-core" }

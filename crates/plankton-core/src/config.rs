@@ -1,16 +1,19 @@
-use std::path::PathBuf;
+use std::{fs, path::PathBuf};
 
 use config::{Config, ConfigError, Environment, File};
 use directories::ProjectDirs;
 use serde::{Deserialize, Serialize};
+use toml::Value as TomlValue;
 
 use crate::template::{
     DEFAULT_LLM_ADVICE_TEMPLATE, DEFAULT_LLM_SYSTEM_PROMPT, DEFAULT_REQUEST_TEMPLATE,
 };
+use crate::PolicyMode;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PlanktonSettings {
     pub database_url: String,
+    pub default_policy_mode: PolicyMode,
     pub provider_kind: String,
     pub request_template: String,
     pub llm_advice_template: String,
@@ -36,6 +39,7 @@ impl Default for PlanktonSettings {
     fn default() -> Self {
         Self {
             database_url: default_database_url(),
+            default_policy_mode: PolicyMode::ManualOnly,
             provider_kind: "mock".to_string(),
             request_template: DEFAULT_REQUEST_TEMPLATE.to_string(),
             llm_advice_template: DEFAULT_LLM_ADVICE_TEMPLATE.to_string(),
@@ -65,10 +69,28 @@ pub enum SettingsError {
     Build(#[from] ConfigError),
 }
 
+#[derive(Debug, thiserror::Error)]
+pub enum SettingsPersistError {
+    #[error("failed to create settings directory: {0}")]
+    CreateDirectory(#[source] std::io::Error),
+    #[error("failed to read existing settings file: {0}")]
+    ReadFile(#[source] std::io::Error),
+    #[error("failed to parse existing settings file: {0}")]
+    ParseToml(#[source] toml::de::Error),
+    #[error("failed to serialize settings file: {0}")]
+    SerializeToml(#[source] toml::ser::Error),
+    #[error("failed to write settings file: {0}")]
+    WriteFile(#[source] std::io::Error),
+}
+
 pub fn load_settings() -> Result<PlanktonSettings, SettingsError> {
     let defaults = PlanktonSettings::default();
     let config = Config::builder()
         .set_default("database_url", defaults.database_url.clone())?
+        .set_default(
+            "default_policy_mode",
+            policy_mode_to_string(defaults.default_policy_mode),
+        )?
         .set_default("provider_kind", defaults.provider_kind.clone())?
         .set_default("request_template", defaults.request_template.clone())?
         .set_default("llm_advice_template", defaults.llm_advice_template.clone())?
@@ -94,6 +116,7 @@ pub fn load_settings() -> Result<PlanktonSettings, SettingsError> {
         .set_default("acp_codex_args", defaults.acp_codex_args.clone())?
         .set_default("acp_timeout_secs", defaults.acp_timeout_secs as i64)?
         .set_default("recent_audit_limit", defaults.recent_audit_limit)?
+        .add_source(File::from(user_settings_path()).required(false))
         .add_source(File::with_name("plankton").required(false))
         .add_source(Environment::with_prefix("PLANKTON").separator("__"))
         .build()?;
@@ -109,6 +132,50 @@ pub fn default_database_url() -> String {
     format!("sqlite://{}", db_path.display())
 }
 
+pub fn user_settings_path() -> PathBuf {
+    if let Some(project_dirs) = ProjectDirs::from("com", "OpenAquarium", "Plankton") {
+        return project_dirs.config_local_dir().join("plankton.toml");
+    }
+
+    std::env::temp_dir().join("plankton-user-settings.toml")
+}
+
+pub fn save_user_default_policy_mode(
+    policy_mode: PolicyMode,
+) -> Result<PathBuf, SettingsPersistError> {
+    let path = user_settings_path();
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(SettingsPersistError::CreateDirectory)?;
+    }
+
+    let mut document = if path.exists() {
+        let existing = fs::read_to_string(&path).map_err(SettingsPersistError::ReadFile)?;
+        toml::from_str::<TomlValue>(&existing).map_err(SettingsPersistError::ParseToml)?
+    } else {
+        TomlValue::Table(toml::map::Map::new())
+    };
+
+    let table = match &mut document {
+        TomlValue::Table(table) => table,
+        _ => {
+            document = TomlValue::Table(toml::map::Map::new());
+            match &mut document {
+                TomlValue::Table(table) => table,
+                _ => unreachable!("table document should be created"),
+            }
+        }
+    };
+
+    table.insert(
+        "default_policy_mode".to_string(),
+        TomlValue::String(policy_mode_to_string(policy_mode)),
+    );
+
+    let serialized = toml::to_string_pretty(&document).map_err(SettingsPersistError::SerializeToml)?;
+    fs::write(&path, serialized).map_err(SettingsPersistError::WriteFile)?;
+    Ok(path)
+}
+
 fn default_database_path() -> PathBuf {
     if let Some(project_dirs) = ProjectDirs::from("com", "OpenAquarium", "Plankton") {
         return project_dirs.data_local_dir().join("plankton.db");
@@ -121,6 +188,12 @@ fn apply_env_overrides(settings: &mut PlanktonSettings) {
     if let Ok(database_url) = std::env::var("PLANKTON_DATABASE_URL") {
         if !database_url.trim().is_empty() {
             settings.database_url = database_url;
+        }
+    }
+
+    if let Ok(policy_mode) = std::env::var("PLANKTON_DEFAULT_POLICY_MODE") {
+        if let Some(policy_mode) = parse_policy_mode(policy_mode.as_str()) {
+            settings.default_policy_mode = policy_mode;
         }
     }
 
@@ -238,5 +311,22 @@ fn apply_env_overrides(settings: &mut PlanktonSettings) {
         if let Ok(limit) = limit.parse::<u32>() {
             settings.recent_audit_limit = limit;
         }
+    }
+}
+
+fn parse_policy_mode(value: &str) -> Option<PolicyMode> {
+    match value.trim() {
+        "manual_only" | "manual-only" => Some(PolicyMode::ManualOnly),
+        "assisted" => Some(PolicyMode::Assisted),
+        "llm_automatic" | "llm-automatic" | "auto" => Some(PolicyMode::LlmAutomatic),
+        _ => None,
+    }
+}
+
+fn policy_mode_to_string(value: PolicyMode) -> String {
+    match value {
+        PolicyMode::ManualOnly => "manual_only".to_string(),
+        PolicyMode::Assisted => "assisted".to_string(),
+        PolicyMode::LlmAutomatic => "llm_automatic".to_string(),
     }
 }

@@ -31,6 +31,16 @@ describe("formatters", () => {
     ).toBe("2h ago");
   });
 
+  it("formats elapsed timestamps in Chinese when locale is zh-CN", () => {
+    expect(
+      formatElapsed(
+        "2026-04-09T10:00:00Z",
+        Date.parse("2026-04-09T12:30:00Z"),
+        "zh-CN",
+      ),
+    ).toBe("2小时前");
+  });
+
   it("shortens identifiers for compact UI labels", () => {
     expect(formatShortId("1234567890abcdef")).toBe("12345678...");
   });

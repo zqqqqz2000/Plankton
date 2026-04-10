@@ -5,7 +5,7 @@ This runbook is the command-level path for validating the current P1 scope.
 The accepted primary flow is:
 
 ```text
-CLI request -> desktop approve/reject -> CLI status/audit
+CLI get -> desktop approve/reject -> CLI status/suggestion/audit
 ```
 
 ## Prerequisites
@@ -66,7 +66,7 @@ Expected result:
 - `cargo build --workspace` and the frontend build are covered by `make build`
 - `cargo test --workspace` and frontend tests are covered by `make test`
 
-## Manual approval flow
+## Human Review flow
 
 ### 1. Start the desktop app
 
@@ -83,8 +83,7 @@ Keep the desktop app running.
 From another terminal:
 
 ```bash
-cargo run -p plankton-cli -- request \
-  --resource secret/api-key \
+cargo run -p plankton-cli -- get secret/api-key \
   --reason "Need local smoke test access" \
   --requested-by alice \
   --script-path scripts/smoke.sh \
@@ -106,12 +105,14 @@ Use the CLI:
 ```bash
 cargo run -p plankton-cli -- queue
 cargo run -p plankton-cli -- status <request-id>
+cargo run -p plankton-cli -- suggestion <request-id>
 ```
 
 Expected result:
 
 - the queue contains the new request
 - `status` returns the request plus audit records
+- `suggestion` remains part of the read-only inspection surface
 - the request is still pending until a desktop decision is recorded
 
 ### 4. Approve or reject in the desktop UI
@@ -156,11 +157,12 @@ Expected result after rejection:
 - the same request visible in the desktop queue
 - desktop approval or rejection action recorded in the UI
 - CLI `status` output after the decision
+- CLI `suggestion` output when the checker needs the read-only explanation surface
 - CLI `audit` output showing the decision trail
 
 ## Current P1 limits
 
-- the live flow is manual approval only
+- the live flow is Human Review only
 - provider support is intentionally a thin interface plus mock placeholder
 - policy modes exist in shared types, but automatic and assisted execution paths are not active
-- CLI `approve` and `reject` commands exist for debugging and fallback inspection, but desktop approval remains the primary validation path
+- the CLI surface for P1 is request submission plus read-only inspection, while user-facing approval remains a desktop UI path

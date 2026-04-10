@@ -1,6 +1,12 @@
 {
   "name": "@plankton/desktop",
   "private": true,
+  "description": "Desktop approval console for Plankton",
+  "homepage": "https://github.com/zqqqqz2000/Plankton",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/zqqqqz2000/Plankton.git"
+  },
   "version": "0.1.0",
   "type": "module",
   "scripts": {

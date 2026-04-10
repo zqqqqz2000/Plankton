@@ -34,6 +34,10 @@ body {
   background: var(--color-bg);
 }
 
+#app {
+  min-height: 100vh;
+}
+
 button,
 textarea {
   font: inherit;
@@ -49,9 +53,9 @@ button:disabled {
 }
 
 .shell {
-  max-width: 980px;
-  margin: 0 auto;
-  padding: var(--space-2);
+  width: 100%;
+  min-height: 100vh;
+  padding: clamp(8px, 1vw, 16px);
 }
 
 .toolbar,
@@ -81,6 +85,10 @@ button:disabled {
 .toolbar {
   margin-bottom: var(--space-2);
   flex-wrap: wrap;
+}
+
+.toolbar-actions {
+  margin-left: auto;
 }
 
 .toolbar h1,
@@ -139,8 +147,9 @@ button:disabled {
 
 .workspace-grid {
   display: grid;
-  grid-template-columns: 260px minmax(0, 1fr);
+  grid-template-columns: clamp(280px, 24vw, 360px) minmax(0, 1fr);
   gap: var(--space-2);
+  align-items: start;
 }
 
 .queue-list {
@@ -246,7 +255,7 @@ button:disabled {
 
 .detail-grid {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(240px, 320px);
+  grid-template-columns: minmax(0, 1fr) clamp(240px, 28vw, 360px);
   gap: var(--space-2);
 }
 
@@ -304,7 +313,8 @@ button:disabled {
 
 .primary,
 .danger,
-.ghost {
+.ghost,
+.locale-button {
   min-height: 34px;
   border-radius: var(--radius-sm);
   padding: 0 var(--space-3);
@@ -328,6 +338,28 @@ button:disabled {
 .ghost {
   background: var(--color-surface);
   color: var(--color-text);
+}
+
+.locale-switch {
+  display: inline-flex;
+  align-items: center;
+  gap: 0;
+  border: var(--border-width) solid var(--color-line);
+}
+
+.locale-button {
+  min-width: 52px;
+  border: none;
+  border-left: var(--border-width) solid var(--color-line);
+}
+
+.locale-button:first-child {
+  border-left: none;
+}
+
+.locale-button.active {
+  background: var(--color-text);
+  color: var(--color-inverse);
 }
 
 .facts,
@@ -482,9 +514,19 @@ button:disabled {
   padding: var(--space-2);
 }
 
-@media (max-width: 960px) {
+@media (max-width: 1120px) {
   .workspace-grid,
   .detail-grid {
     grid-template-columns: 1fr;
+  }
+
+  .toolbar-actions {
+    margin-left: 0;
+  }
+}
+
+@media (max-width: 720px) {
+  .shell {
+    padding: var(--space-2);
   }
 }
