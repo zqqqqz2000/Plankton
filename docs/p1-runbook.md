@@ -111,17 +111,17 @@ From another terminal:
 cargo run -p plankton -- get secret/api-key \
   --reason "Need local smoke test access" \
   --requested-by alice \
-  --script-path scripts/smoke.sh \
   --metadata environment=dev
 ```
 
 Expected result:
 
-- the CLI prints JSON for the request lifecycle
-- the JSON includes a request `id`
 - Plankton automatically captures the runtime call chain during request submission
 - if the request needs review, Plankton hands off to the desktop UI and keeps the request pending until a final decision is recorded
-- when the command returns, the response includes the final `approval_status` and `final_decision`
+- on `allow + resolve value success`, default text `stdout` prints only the raw secret value
+- if you run the same command with `--output json`, the result is a minimal `get` envelope rather than a full request or audit dump
+- the resolved value comes from the local secret catalog runtime resolver, not from SQLite, audit records, or provider payloads
+- `deny`, `pending`, or resolver errors keep `stdout` empty and report status or errors separately
 
 ### 4. Approve or reject in the desktop UI when review is required
 
@@ -143,14 +143,12 @@ Back in the terminal output and desktop UI:
 
 Expected result after approval:
 
-- `approval_status` is `approved`
-- `final_decision` is `allow`
+- the terminal prints only the resolved secret value on `stdout`
 - the desktop request audit shows the submission event and the approval event
 
 Expected result after rejection:
 
-- `approval_status` is `rejected`
-- `final_decision` is `deny`
+- the terminal keeps `stdout` empty and reports the failure on `stderr`
 - the desktop request audit shows the submission event and the rejection event
 
 ## Evidence checker should capture
@@ -158,7 +156,8 @@ Expected result after rejection:
 - successful exit for `make fmt-check`, `make check`, `make build`, `make test`, and when needed `make desktop-build`
 - CLI `list` output showing resource identifiers without secret values
 - CLI `search` output showing filtered identifiers without secret values
-- CLI JSON showing a newly created request ID and final decision fields
+- successful `get` text output showing only one raw value on `stdout`
+- `get --output json` showing a minimal value envelope instead of a request/status dump
 - the same request visible in the desktop queue
 - desktop approval or rejection action recorded in the UI
 - desktop detail and request audit views after the decision

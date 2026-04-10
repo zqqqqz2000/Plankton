@@ -1,15 +1,22 @@
 mod desktop_handoff;
 
-use std::{collections::BTreeMap, env, process::ExitCode, time::Duration};
+use std::{
+    collections::BTreeMap,
+    env,
+    io::{self, Write},
+    process::ExitCode,
+    time::Duration,
+};
 
 use anyhow::{bail, Context, Result};
 use clap::{ArgGroup, Args, Parser, Subcommand, ValueEnum};
 use desktop_handoff::maybe_trigger_desktop_handoff;
 use plankton_core::{
-    collect_runtime_call_chain, derive_script_path, load_settings, prompt_call_chain_paths,
-    AccessRequest, ApprovalStatus, AuditAction, AuditRecord, AutomaticDecisionSource,
-    AutomaticDecisionTrace, AutomaticDisposition, Decision, LlmSuggestion, LlmSuggestionUsage,
-    PolicyMode, ProviderTrace, RequestContext, SuggestedDecision,
+    collect_runtime_call_chain, default_value_resolver, derive_script_path, load_settings,
+    prompt_call_chain_paths, AccessRequest, ApprovalStatus, AuditAction, AuditRecord,
+    AutomaticDecisionSource, AutomaticDecisionTrace, AutomaticDisposition, Decision, LlmSuggestion,
+    LlmSuggestionUsage, PolicyMode, ProviderTrace, RequestContext, SuggestedDecision,
+    ValueResolver,
 };
 use plankton_store::{AccessibleResourceRecord, RequestQueryResult, SqliteStore};
 use serde::Serialize;
@@ -25,7 +32,7 @@ const GET_POLL_INTERVAL: Duration = Duration::from_millis(250);
     version,
     about = "Plankton command-line companion for listing, searching, and requesting access",
     arg_required_else_help = true,
-    after_help = "Examples:\n  plankton list\n  plankton search api-token\n  plankton get secret/api-token --reason \"Smoke test\" --requested-by alice\n  plankton get secret/api-token --reason \"Auto smoke\" --policy-mode auto\n\nHuman approvals and request history live in the desktop UI. The public CLI surface is intentionally limited to `get`, `list`, and `search`."
+    after_help = "Examples:\n  plankton list\n  plankton search api-token\n  plankton get secret/api-token --reason \"Smoke test\" --requested-by alice\n  plankton get secret/api-token --reason \"Auto smoke\" --policy-mode auto\n  plankton get secret/api-token --reason \"Scripted smoke\" --output json\n\nSuccessful `get` text output prints only the resolved secret value. Use `--output json` for a minimal machine-readable envelope.\n\nHuman approvals and request history live in the desktop UI. The public CLI surface is intentionally limited to `get`, `list`, and `search`."
 )]
 struct Cli {
     #[arg(
@@ -68,7 +75,8 @@ impl From<CliPolicyMode> for PolicyMode {
 enum Commands {
     #[command(
         visible_alias = "request",
-        about = "Request access to one resource and continue the decision flow through Plankton"
+        about = "Request access to one resource and print only its resolved value on successful text output",
+        after_help = "Output contract:\n  text (default): when Plankton both allows the request and resolves the value, stdout prints only the raw value.\n  json: prints a minimal envelope for scripts and tooling.\n  deny, pending, or resolver errors: stdout stays empty and the error or status is reported on stderr.\n\nValue source:\n  Values are resolved at runtime from the local secret catalog, not from SQLite, audit records, or provider payloads."
     )]
     Get(GetArgs),
     #[command(
@@ -266,6 +274,27 @@ struct StatusOutputView {
     audit_records: Vec<AuditEntryView>,
 }
 
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum GetDecision {
+    Allow,
+    Deny,
+    Pending,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq, Serialize)]
+struct GetOutputEnvelope {
+    resource: String,
+    request_id: String,
+    decision: GetDecision,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    value: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    resolver_kind: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize)]
 struct AccessibleResourceView {
     resource: String,
@@ -347,7 +376,7 @@ async fn main() -> ExitCode {
     init_tracing();
 
     match run().await {
-        Ok(()) => ExitCode::SUCCESS,
+        Ok(code) => code,
         Err(error) => {
             eprintln!("error: {error}");
             for cause in error.chain().skip(1) {
@@ -359,7 +388,7 @@ async fn main() -> ExitCode {
     }
 }
 
-async fn run() -> Result<()> {
+async fn run() -> Result<ExitCode> {
     let Cli { output, command } = Cli::parse();
     let settings = load_settings().context("failed to load Plankton settings")?;
     let store = SqliteStore::new(&settings)
@@ -397,8 +426,7 @@ async fn run() -> Result<()> {
                 .context("failed to submit access request")?;
             maybe_trigger_desktop_handoff(&request)?;
             let result = wait_for_terminal_request(&store, &request.id).await?;
-            let get_output = build_status_output(&result);
-            print_output(output, &get_output, || render_status_text(&result))?;
+            return handle_get_result(output, &result);
         }
         Commands::List(_) => {
             let resources = store
@@ -423,7 +451,7 @@ async fn run() -> Result<()> {
         }
     }
 
-    Ok(())
+    Ok(ExitCode::SUCCESS)
 }
 
 async fn wait_for_terminal_request(
@@ -471,6 +499,139 @@ where
     }
 
     Ok(())
+}
+
+fn print_json_output<T>(value: &T) -> Result<()>
+where
+    T: Serialize,
+{
+    println!(
+        "{}",
+        serde_json::to_string_pretty(value).context("failed to serialize CLI output")?
+    );
+    Ok(())
+}
+
+fn print_raw_value(value: &str) -> Result<()> {
+    let mut stdout = io::stdout().lock();
+    stdout
+        .write_all(value.as_bytes())
+        .context("failed to write secret value to stdout")?;
+    stdout
+        .write_all(b"\n")
+        .context("failed to terminate secret value output")?;
+    stdout.flush().context("failed to flush stdout")?;
+    Ok(())
+}
+
+fn handle_get_result(output: OutputFormat, result: &RequestQueryResult) -> Result<ExitCode> {
+    match result.request.final_decision {
+        Some(Decision::Allow) => {
+            let resolver = match default_value_resolver() {
+                Ok(resolver) => resolver,
+                Err(error) => {
+                    return handle_get_failure(
+                        output,
+                        &result.request,
+                        GetDecision::Allow,
+                        format!(
+                            "request {} was allowed for resource {} but the value resolver could not be initialized: {}",
+                            result.request.id, result.request.context.resource, error
+                        ),
+                    );
+                }
+            };
+
+            match resolver.resolve(&result.request.context.resource) {
+                Ok(value) => match output {
+                    OutputFormat::Text => {
+                        print_raw_value(&value)?;
+                        Ok(ExitCode::SUCCESS)
+                    }
+                    OutputFormat::Json => {
+                        print_json_output(&build_get_success_output(
+                            &result.request,
+                            value,
+                            resolver.kind(),
+                        ))?;
+                        Ok(ExitCode::SUCCESS)
+                    }
+                },
+                Err(error) => handle_get_failure(
+                    output,
+                    &result.request,
+                    GetDecision::Allow,
+                    format!(
+                        "request {} was allowed for resource {} but the value resolver failed: {}",
+                        result.request.id, result.request.context.resource, error
+                    ),
+                ),
+            }
+        }
+        Some(Decision::Deny) => handle_get_failure(
+            output,
+            &result.request,
+            GetDecision::Deny,
+            format!(
+                "request {} was denied for resource {}",
+                result.request.id, result.request.context.resource
+            ),
+        ),
+        None => handle_get_failure(
+            output,
+            &result.request,
+            GetDecision::Pending,
+            format!(
+                "request {} for resource {} did not resolve to a final allow or deny decision",
+                result.request.id, result.request.context.resource
+            ),
+        ),
+    }
+}
+
+fn handle_get_failure(
+    output: OutputFormat,
+    request: &AccessRequest,
+    decision: GetDecision,
+    error: String,
+) -> Result<ExitCode> {
+    match output {
+        OutputFormat::Text => bail!(error),
+        OutputFormat::Json => {
+            print_json_output(&build_get_error_output(request, decision, error))?;
+            Ok(ExitCode::FAILURE)
+        }
+    }
+}
+
+fn build_get_success_output(
+    request: &AccessRequest,
+    value: String,
+    resolver_kind: &str,
+) -> GetOutputEnvelope {
+    GetOutputEnvelope {
+        resource: request.context.resource.clone(),
+        request_id: request.id.clone(),
+        decision: GetDecision::Allow,
+        value: Some(value),
+        resolver_kind: Some(resolver_kind.to_string()),
+        error: None,
+    }
+}
+
+fn build_get_error_output(
+    request: &AccessRequest,
+    decision: GetDecision,
+    error: String,
+) -> GetOutputEnvelope {
+    GetOutputEnvelope {
+        resource: request.context.resource.clone(),
+        request_id: request.id.clone(),
+        decision,
+        value: None,
+        resolver_kind: None,
+        error: Some(error),
+    }
 }
 
 fn filter_accessible_resources(
@@ -1779,6 +1940,71 @@ mod tests {
             }
             _ => panic!("expected search command"),
         }
+    }
+
+    #[test]
+    fn get_success_output_uses_minimal_value_envelope() {
+        let request = AccessRequest::new_pending(
+            RequestContext::new(
+                "secret/demo".to_string(),
+                "Need demo value".to_string(),
+                "alice".to_string(),
+            ),
+            PolicyMode::LlmAutomatic,
+            Some("mock".to_string()),
+            "rendered prompt".to_string(),
+            None,
+            None,
+        );
+
+        let output = build_get_success_output(
+            &request,
+            "resolved-secret".to_string(),
+            "local_secret_catalog",
+        );
+        let serialized =
+            serde_json::to_value(&output).expect("get success output should serialize to JSON");
+
+        assert_eq!(serialized["resource"], "secret/demo");
+        assert_eq!(serialized["request_id"], request.id);
+        assert_eq!(serialized["decision"], "allow");
+        assert_eq!(serialized["value"], "resolved-secret");
+        assert_eq!(serialized["resolver_kind"], "local_secret_catalog");
+        assert!(serialized.get("error").is_none());
+    }
+
+    #[test]
+    fn get_error_output_omits_value_and_resolver_kind() {
+        let request = AccessRequest::new_pending(
+            RequestContext::new(
+                "secret/demo".to_string(),
+                "Need demo value".to_string(),
+                "alice".to_string(),
+            ),
+            PolicyMode::ManualOnly,
+            None,
+            "rendered prompt".to_string(),
+            None,
+            None,
+        );
+
+        let output = build_get_error_output(
+            &request,
+            GetDecision::Allow,
+            "request was allowed but the local catalog entry is missing".to_string(),
+        );
+        let serialized =
+            serde_json::to_value(&output).expect("get error output should serialize to JSON");
+
+        assert_eq!(serialized["resource"], "secret/demo");
+        assert_eq!(serialized["request_id"], request.id);
+        assert_eq!(serialized["decision"], "allow");
+        assert_eq!(
+            serialized["error"],
+            "request was allowed but the local catalog entry is missing"
+        );
+        assert!(serialized.get("value").is_none());
+        assert!(serialized.get("resolver_kind").is_none());
     }
 
     #[test]

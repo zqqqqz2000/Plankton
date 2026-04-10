@@ -6,6 +6,7 @@ pub mod domain;
 pub mod provider;
 pub mod sanitization;
 pub mod template;
+pub mod value_resolver;
 
 pub use acp::{
     AcpPromptResult, AcpSessionClient, AcpSessionConfig, ACP_CODEX_PACKAGE_NAME,
@@ -43,4 +44,8 @@ pub use template::{
     DEFAULT_LLM_ADVICE_TEMPLATE, DEFAULT_LLM_SYSTEM_PROMPT, DEFAULT_REQUEST_TEMPLATE,
     LLM_ADVICE_TEMPLATE_ID, LLM_ADVICE_TEMPLATE_VERSION, PROMPT_CONTRACT_VERSION,
     REQUEST_TEMPLATE_ID, REQUEST_TEMPLATE_VERSION,
+};
+pub use value_resolver::{
+    default_value_resolver, local_secret_catalog_path, LocalSecretCatalogResolver, ValueResolver,
+    ValueResolverError,
 };

@@ -1,14 +1,15 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-if [ "$#" -ne 3 ]; then
-  echo "usage: $0 <version> <github-repository> <checksums-file>" >&2
+if [ "$#" -lt 3 ] || [ "$#" -gt 4 ]; then
+  echo "usage: $0 <version> <github-repository> <checksums-file> [release-ref]" >&2
   exit 1
 fi
 
 version="$1"
 github_repository="$2"
 checksums_file="$3"
+release_ref="${4:-v${version}}"
 formula_class="PlanktonHelper"
 binary_name="plankton"
 homepage_url="https://github.com/${github_repository}"
@@ -29,9 +30,10 @@ fi
 cat <<EOF
 class ${formula_class} < Formula
   desc "Command-line companion installed by the Plankton desktop cask"
+  version "${version}"
   homepage "${homepage_url}"
   license "MIT"
-  url "${homepage_url}/releases/download/v${version}/plankton-v${version}-aarch64-apple-darwin.tar.gz"
+  url "${homepage_url}/releases/download/${release_ref}/plankton-v${version}-aarch64-apple-darwin.tar.gz"
   sha256 "${archive_sha}"
 
   def install
@@ -41,7 +43,7 @@ class ${formula_class} < Formula
 
   test do
     help = shell_output("#{bin}/${binary_name} --help")
-    assert_match "read-only", help
+    assert_match "public CLI surface", help
   end
 end
 EOF

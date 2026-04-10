@@ -68,7 +68,13 @@ plankton get secret/api-token \
   --requested-by alice
 ```
 
-如果这次请求不能自动完成，Plankton 会把流程交给桌面 UI。人工审批、建议查看和审计查看都在 UI 中完成。
+成功时，默认 text 输出只会打印一个解析出来的裸 value，不会再附带 request ID、审批摘要、provider 元信息或其他包装文本。
+
+如果你需要给脚本或工具链消费的结构化结果，请改用 `--output json`。JSON 路径会返回一个最小专用 envelope，而不是整包 request 或 audit dump。
+
+这个 value 会在运行时从本地 secret catalog 解析，不会从 SQLite、audit 记录或 provider payload 中读回。如果你的环境使用显式 catalog 文件，请先把它指给 Plankton（例如 `PLANKTON_SECRET_FILE=/abs/path/...`）。
+
+如果这次请求不能自动完成，Plankton 会把流程交给桌面 UI。人工审批、建议查看和审计查看都在 UI 中完成。非成功路径保持 `stdout` 为空，状态或错误会单独输出。
 
 如果你当前是在源码仓库里做本地开发，而不是使用 cask 安装，可以把同样的命令换成 `cargo run -p plankton -- ...`。
 
