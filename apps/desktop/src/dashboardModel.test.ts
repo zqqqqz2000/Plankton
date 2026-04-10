@@ -5,7 +5,9 @@ import {
   getDashboardSummary,
   getRequestAuditRecords,
   getResolvedAutoDecisionEntries,
+  getResolvedReviewRequestEntries,
   getSuggestionTrace,
+  getSuggestionSummary,
   getSelectedRequest,
   toKeyValueEntries,
 } from "./dashboardModel";
@@ -244,6 +246,96 @@ describe("dashboardModel", () => {
         }),
       }),
     ]);
+  });
+
+  it("derives recent resolved review requests from approval audit records", () => {
+    const entries = getResolvedReviewRequestEntries([
+      ...dashboardFixture.recent_audit_records,
+      {
+        id: "audit-5",
+        request_id: "request-2",
+        action: "llm_suggestion_generated",
+        actor: "claude",
+        note: "Low-risk incident access",
+        payload: {
+          suggested_decision: "allow",
+          risk_score: 18,
+          template_version: "2",
+          provider_model: "claude-3-7-sonnet-20250219",
+        },
+        created_at: "2026-04-09T12:05:30Z",
+      },
+      {
+        id: "audit-6",
+        request_id: "request-2",
+        action: "approval_recorded",
+        actor: "reviewer.alice",
+        note: "Approved for incident response",
+        payload: {
+          approval_status: "approved",
+          decision: "allow",
+        },
+        created_at: "2026-04-09T12:06:00Z",
+      },
+      {
+        id: "audit-7",
+        request_id: "request-3",
+        action: "approval_recorded",
+        actor: "system_auto",
+        note: "Automatically allowed",
+        payload: {
+          approval_status: "approved",
+          decision: "allow",
+        },
+        created_at: "2026-04-09T12:07:00Z",
+      },
+    ]);
+
+    expect(entries).toEqual([
+      {
+        request_id: "request-2",
+        resource: "env/prod-db",
+        reason: "Needs incident access",
+        requested_by: "bob",
+        policy_mode: null,
+        submitted_at: "2026-04-09T12:05:00Z",
+        recorded_at: "2026-04-09T12:06:00Z",
+        approval_status: "approved",
+        final_decision: "allow",
+        reviewed_by: "reviewer.alice",
+        decision_note: "Approved for incident response",
+      },
+    ]);
+  });
+
+  it("extracts suggestion summary for resolved review detail rendering", () => {
+    const summary = getSuggestionSummary([
+      {
+        id: "audit-8",
+        request_id: "request-4",
+        action: "llm_suggestion_generated",
+        actor: "claude",
+        note: "Provider suggests allow",
+        payload: {
+          suggested_decision: "allow",
+          risk_score: 12,
+          template_version: "4",
+          provider_model: "claude-3-7-sonnet-20250219",
+        },
+        created_at: "2026-04-09T12:08:00Z",
+      },
+    ]);
+
+    expect(summary).toEqual({
+      provider_kind: "claude",
+      provider_model: "claude-3-7-sonnet-20250219",
+      suggested_decision: "allow",
+      rationale_summary: "Provider suggests allow",
+      risk_score: 12,
+      template_version: "4",
+      generated_at: "2026-04-09T12:08:00Z",
+      error: null,
+    });
   });
 
   it("extracts ACP provider trace from request audit records", () => {

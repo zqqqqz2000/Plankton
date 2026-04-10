@@ -1,24 +1,30 @@
-use std::{collections::BTreeMap, env, process::ExitCode};
+mod desktop_handoff;
+
+use std::{collections::BTreeMap, env, process::ExitCode, time::Duration};
 
 use anyhow::{bail, Context, Result};
 use clap::{ArgGroup, Args, Parser, Subcommand, ValueEnum};
+use desktop_handoff::maybe_trigger_desktop_handoff;
 use plankton_core::{
     load_settings, AccessRequest, ApprovalStatus, AuditAction, AuditRecord,
     AutomaticDecisionSource, AutomaticDecisionTrace, AutomaticDisposition, Decision, LlmSuggestion,
     LlmSuggestionUsage, PolicyMode, ProviderTrace, RequestContext, SuggestedDecision,
 };
-use plankton_store::{RequestQueryResult, SqliteStore};
+use plankton_store::{AccessibleResourceRecord, RequestQueryResult, SqliteStore};
 use serde::Serialize;
 use serde_json::Value;
+use tokio::time::sleep;
 use tracing_subscriber::{fmt, EnvFilter};
+
+const GET_POLL_INTERVAL: Duration = Duration::from_millis(250);
 
 #[derive(Debug, Parser)]
 #[command(
     author,
     version,
-    about = "Plankton command-line companion for submitting access attempts and reading request, suggestion, and audit state",
+    about = "Plankton command-line companion for listing, searching, and requesting access",
     arg_required_else_help = true,
-    after_help = "Examples:\n  plankton get secret/api-token --reason \"Smoke test\" --requested-by alice\n  plankton get secret/api-token --reason \"Auto smoke\" --policy-mode auto\n  plankton status <request-id>\n  plankton suggestion <request-id>\n  plankton queue --limit 10\n  plankton audit <request-id>\n\nHuman approvals happen in the desktop UI. After submission, this CLI is read-only."
+    after_help = "Examples:\n  plankton list\n  plankton search api-token\n  plankton get secret/api-token --reason \"Smoke test\" --requested-by alice\n  plankton get secret/api-token --reason \"Auto smoke\" --policy-mode auto\n\nHuman approvals and request history live in the desktop UI. The public CLI surface is intentionally limited to `get`, `list`, and `search`."
 )]
 struct Cli {
     #[arg(
@@ -61,33 +67,15 @@ impl From<CliPolicyMode> for PolicyMode {
 enum Commands {
     #[command(
         visible_alias = "request",
-        about = "Submit a new access attempt for review and audit"
+        about = "Request access to one resource and continue the decision flow through Plankton"
     )]
     Get(GetArgs),
     #[command(
-        about = "Inspect one request together with its suggestion summary and audit timeline"
+        about = "List resource identifiers currently available to the local LLM surface without revealing secret values"
     )]
-    Status {
-        #[arg(help = "Request identifier returned by `get`")]
-        request_id: String,
-    },
-    #[command(about = "Inspect the focused LLM suggestion view for one request")]
-    Suggestion {
-        #[arg(help = "Request identifier returned by `get`")]
-        request_id: String,
-    },
-    #[command(about = "List pending requests that still require desktop review")]
-    Queue {
-        #[arg(long, help = "Show at most N pending requests")]
-        limit: Option<usize>,
-    },
-    #[command(about = "Inspect recent audit records or the audit trail for one request")]
-    Audit {
-        #[arg(help = "Optional request identifier returned by `get` to scope audit output")]
-        request_id: Option<String>,
-        #[arg(long, default_value_t = 20, help = "Maximum records to print")]
-        limit: u32,
-    },
+    List(ListArgs),
+    #[command(about = "Fuzzy-search the same accessible resource identifier view used by `list`")]
+    Search(SearchArgs),
 }
 
 #[derive(Debug, Args)]
@@ -139,6 +127,18 @@ struct GetArgs {
         help = "Choose Human Review, assisted review with an LLM suggestion, or fully automatic LLM disposition"
     )]
     policy_mode: CliPolicyMode,
+}
+
+#[derive(Debug, Args)]
+struct ListArgs {}
+
+#[derive(Debug, Args)]
+struct SearchArgs {
+    #[arg(
+        value_name = "QUERY",
+        help = "Case-insensitive fuzzy match against resource identifiers"
+    )]
+    query: String,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
@@ -274,11 +274,21 @@ struct StatusOutputView {
 }
 
 #[derive(Debug, Clone, Serialize)]
-struct QueueOutputView {
-    pending_request_count: usize,
-    requests: Vec<RequestSummaryView>,
+struct AccessibleResourceView {
+    resource: String,
+    granted_by_request_id: String,
+    policy_mode: PolicyMode,
+    provider_kind: Option<String>,
+    granted_at: chrono::DateTime<chrono::Utc>,
 }
 
+#[derive(Debug, Clone, Serialize)]
+struct AccessibleResourceListOutputView {
+    resource_count: usize,
+    resources: Vec<AccessibleResourceView>,
+}
+
+#[cfg(test)]
 #[derive(Debug, Clone, Serialize)]
 struct AuditOutputView {
     request_id: Option<String>,
@@ -392,58 +402,52 @@ async fn run() -> Result<()> {
                 .submit_request(&settings, context, policy_mode.into())
                 .await
                 .context("failed to submit access request")?;
-            print_output(output, &request, || render_submission_text(&request))?;
+            maybe_trigger_desktop_handoff(&request)?;
+            let result = wait_for_terminal_request(&store, &request.id).await?;
+            let get_output = build_status_output(&result);
+            print_output(output, &get_output, || render_status_text(&result))?;
         }
-        Commands::Status { request_id } => {
-            let request = store
-                .get_request(&request_id)
+        Commands::List(_) => {
+            let resources = store
+                .list_accessible_resources()
                 .await
-                .with_context(|| format!("failed to load request {request_id}"))?;
-            let status_output = build_status_output(&request);
-            print_output(output, &status_output, || render_status_text(&request))?;
+                .context("failed to list accessible resource identifiers")?;
+            let list_output = build_accessible_resource_list_output(&resources);
+            print_output(output, &list_output, || {
+                render_accessible_resource_list_text(&resources)
+            })?;
         }
-        Commands::Suggestion { request_id } => {
-            let request = store
-                .get_request(&request_id)
+        Commands::Search(args) => {
+            let resources = store
+                .list_accessible_resources()
                 .await
-                .with_context(|| format!("failed to load request {request_id}"))?;
-            let report = build_suggestion_report(&request.request);
-            print_output(output, &report, || render_suggestion_report_text(&report))?;
-        }
-        Commands::Queue { limit } => {
-            let pending = store
-                .list_pending_requests()
-                .await
-                .context("failed to list pending requests")?;
-            let pending = apply_limit(pending, limit);
-            let queue_output = build_queue_output(&pending);
-            print_output(output, &queue_output, || render_queue_text(&pending))?;
-        }
-        Commands::Audit { request_id, limit } => {
-            if let Some(request_id) = request_id {
-                let request = store
-                    .get_request(&request_id)
-                    .await
-                    .with_context(|| format!("failed to load request {request_id}"))?;
-                let mut records = request.audit_records;
-                records.reverse();
-                records.truncate(limit as usize);
-                let audit_output = build_audit_output(Some(&request_id), &records);
-                print_output(output, &audit_output, || {
-                    render_audit_text(&records, Some(&request_id))
-                })?;
-            } else {
-                let records = store
-                    .list_audit_records(limit)
-                    .await
-                    .context("failed to list audit records")?;
-                let audit_output = build_audit_output(None, &records);
-                print_output(output, &audit_output, || render_audit_text(&records, None))?;
-            }
+                .context("failed to load accessible resource identifiers for search")?;
+            let filtered = filter_accessible_resources(&resources, &args.query);
+            let list_output = build_accessible_resource_list_output(&filtered);
+            print_output(output, &list_output, || {
+                render_accessible_resource_list_text(&filtered)
+            })?;
         }
     }
 
     Ok(())
+}
+
+async fn wait_for_terminal_request(
+    store: &SqliteStore,
+    request_id: &str,
+) -> Result<RequestQueryResult> {
+    loop {
+        let result = store
+            .get_request(request_id)
+            .await
+            .with_context(|| format!("failed to load request {request_id}"))?;
+        if result.request.approval_status != ApprovalStatus::Pending {
+            return Ok(result);
+        }
+
+        sleep(GET_POLL_INTERVAL).await;
+    }
 }
 
 fn init_tracing() {
@@ -476,11 +480,16 @@ where
     Ok(())
 }
 
-fn apply_limit<T>(items: Vec<T>, limit: Option<usize>) -> Vec<T> {
-    match limit {
-        Some(limit) => items.into_iter().take(limit).collect(),
-        None => items,
-    }
+fn filter_accessible_resources(
+    resources: &[AccessibleResourceRecord],
+    query: &str,
+) -> Vec<AccessibleResourceRecord> {
+    let query = query.trim().to_ascii_lowercase();
+    resources
+        .iter()
+        .filter(|resource| resource.resource.to_ascii_lowercase().contains(&query))
+        .cloned()
+        .collect()
 }
 
 fn build_suggestion_report(request: &AccessRequest) -> SuggestionReport {
@@ -684,13 +693,25 @@ fn build_status_output(result: &RequestQueryResult) -> StatusOutputView {
     }
 }
 
-fn build_queue_output(requests: &[AccessRequest]) -> QueueOutputView {
-    QueueOutputView {
-        pending_request_count: requests.len(),
-        requests: requests.iter().map(build_request_summary_view).collect(),
+fn build_accessible_resource_list_output(
+    resources: &[AccessibleResourceRecord],
+) -> AccessibleResourceListOutputView {
+    AccessibleResourceListOutputView {
+        resource_count: resources.len(),
+        resources: resources
+            .iter()
+            .map(|resource| AccessibleResourceView {
+                resource: resource.resource.clone(),
+                granted_by_request_id: resource.granted_by_request_id.clone(),
+                policy_mode: resource.policy_mode,
+                provider_kind: resource.provider_kind.clone(),
+                granted_at: resource.granted_at,
+            })
+            .collect(),
     }
 }
 
+#[cfg(test)]
 fn build_audit_output(request_id: Option<&str>, records: &[AuditRecord]) -> AuditOutputView {
     AuditOutputView {
         request_id: request_id.map(ToOwned::to_owned),
@@ -838,33 +859,12 @@ fn classify_risk(score: u8) -> &'static str {
     }
 }
 
-fn render_submission_text(request: &AccessRequest) -> String {
-    let mut lines = vec![
-        render_request_text(request),
-        format!("next_action: plankton status {}", request.id),
-    ];
-    if request.llm_suggestion.is_some() {
-        lines.push(format!(
-            "next_suggestion_action: plankton suggestion {}",
-            request.id
-        ));
-    }
-
-    lines.join("\n")
-}
-
 fn render_status_text(result: &RequestQueryResult) -> String {
     if result.audit_records.is_empty() {
-        let mut lines = vec![
+        let lines = vec![
             render_request_text(&result.request),
             "audit_timeline: -".to_string(),
         ];
-        if result.request.llm_suggestion.is_some() {
-            lines.push(format!(
-                "suggestion_view: plankton suggestion {}",
-                result.request.id
-            ));
-        }
         return lines.join("\n");
     }
 
@@ -884,56 +884,45 @@ fn render_status_text(result: &RequestQueryResult) -> String {
         .collect::<Vec<_>>()
         .join("\n");
 
-    let mut lines = vec![
+    let lines = vec![
         render_request_text(&result.request),
         format!("audit_record_count: {}", result.audit_records.len()),
         "audit_timeline:".to_string(),
         timeline,
     ];
-    if result.request.llm_suggestion.is_some() {
-        lines.push(format!(
-            "suggestion_view: plankton suggestion {}",
-            result.request.id
-        ));
-    }
 
     lines.join("\n")
 }
 
-fn render_queue_text(requests: &[AccessRequest]) -> String {
-    if requests.is_empty() {
-        return "pending_request_count: 0".to_string();
+fn render_accessible_resource_list_text(resources: &[AccessibleResourceRecord]) -> String {
+    if resources.is_empty() {
+        return "resource_count: 0".to_string();
     }
 
-    let entries = requests
+    let entries = resources
         .iter()
         .enumerate()
-        .map(|(index, request)| {
-            let mut lines = vec![format!(
-                "[{}]\nrequest_id: {}\napproval_status: {}\nresource: {}\nrequested_by: {}\nreason: {}\ncreated_at: {}",
-                index + 1,
-                request.id,
-                enum_label(&request.approval_status),
-                request.context.resource,
-                request.context.requested_by,
-                request.context.reason,
-                request.created_at.to_rfc3339()
-            )];
-            if let Some(summary) = render_queue_suggestion_summary(request) {
-                lines.push(summary);
-            }
-            if let Some(summary) = render_queue_automatic_summary(request) {
-                lines.push(summary);
-            }
-
-            lines.join("\n")
+        .map(|(index, resource)| {
+            [
+                format!("[{}]", index + 1),
+                format!("resource: {}", resource.resource),
+                format!("granted_by_request_id: {}", resource.granted_by_request_id),
+                format!("policy_mode: {}", enum_label(&resource.policy_mode)),
+                format!(
+                    "provider_kind: {}",
+                    optional_str(resource.provider_kind.as_deref())
+                ),
+                format!("granted_at: {}", resource.granted_at.to_rfc3339()),
+            ]
+            .join("\n")
         })
         .collect::<Vec<_>>()
         .join("\n\n");
 
-    format!("pending_request_count: {}\n\n{}", requests.len(), entries)
+    format!("resource_count: {}\n\n{}", resources.len(), entries)
 }
 
+#[cfg(test)]
 fn render_audit_text(records: &[AuditRecord], request_id: Option<&str>) -> String {
     let mut header = vec![format!("audit_record_count: {}", records.len())];
     if let Some(request_id) = request_id {
@@ -957,6 +946,7 @@ fn render_audit_text(records: &[AuditRecord], request_id: Option<&str>) -> Strin
     header.join("\n")
 }
 
+#[cfg(test)]
 fn render_suggestion_report_text(report: &SuggestionReport) -> String {
     let mut lines = vec![
         format!("request_id: {}", report.request_id),
@@ -971,6 +961,7 @@ fn render_suggestion_report_text(report: &SuggestionReport) -> String {
     lines.join("\n")
 }
 
+#[cfg(test)]
 fn render_queue_suggestion_summary(request: &AccessRequest) -> Option<String> {
     let report = build_suggestion_report(request);
     match &report.suggestion {
@@ -1025,6 +1016,7 @@ fn render_queue_suggestion_summary(request: &AccessRequest) -> Option<String> {
     }
 }
 
+#[cfg(test)]
 fn render_queue_automatic_summary(request: &AccessRequest) -> Option<String> {
     request.automatic_decision.as_ref().map(|decision| {
         format!(
@@ -1043,6 +1035,7 @@ fn render_queue_automatic_summary(request: &AccessRequest) -> Option<String> {
     })
 }
 
+#[cfg(test)]
 fn render_audit_record_text(index: usize, record: &AuditRecord) -> String {
     let mut lines = vec![
         format!("[{index}]"),
@@ -1086,6 +1079,7 @@ fn render_audit_record_text(index: usize, record: &AuditRecord) -> String {
     lines.join("\n")
 }
 
+#[cfg(test)]
 fn render_audit_suggestion_fields(record: &AuditRecord) -> Vec<String> {
     let provider_kind =
         payload_string(&record.payload, "provider_kind").or_else(|| Some(record.actor.clone()));
@@ -1126,6 +1120,7 @@ fn render_audit_suggestion_fields(record: &AuditRecord) -> Vec<String> {
     lines
 }
 
+#[cfg(test)]
 fn render_automatic_audit_fields(payload: &Value) -> Vec<String> {
     vec![
         format!(
@@ -1421,6 +1416,7 @@ fn render_acp_trace_lines(acp_trace: Option<&AcpTraceView>) -> Vec<String> {
     ]
 }
 
+#[cfg(test)]
 fn render_inline_acp_trace(acp_trace: Option<&AcpTraceView>) -> Option<String> {
     let acp_trace = acp_trace?;
 
@@ -1460,6 +1456,7 @@ fn render_claude_trace_lines(claude_trace: Option<&ClaudeTraceView>) -> Vec<Stri
     ]
 }
 
+#[cfg(test)]
 fn render_inline_claude_trace(claude_trace: Option<&ClaudeTraceView>) -> Option<String> {
     let claude_trace = claude_trace?;
 
@@ -1564,6 +1561,7 @@ fn format_payload(payload: &Value) -> String {
     }
 }
 
+#[cfg(test)]
 fn payload_field(payload: &Value, key: &str) -> String {
     payload
         .get(key)
@@ -1650,6 +1648,8 @@ fn parse_key_values(flag: &str, values: Vec<String>) -> Result<BTreeMap<String, 
 mod tests {
     use super::*;
     use clap::CommandFactory;
+    use tempfile::tempdir;
+    use tokio::time::timeout;
 
     #[test]
     fn parses_get_command_with_positional_resource() {
@@ -1765,15 +1765,25 @@ mod tests {
     }
 
     #[test]
-    fn parses_suggestion_command_happy_path() {
-        let cli = Cli::try_parse_from(["plankton", "suggestion", "request-123"])
-            .expect("suggestion command should parse");
+    fn parses_list_command_happy_path() {
+        let cli = Cli::try_parse_from(["plankton", "list"]).expect("list command should parse");
 
         match cli.command {
-            Commands::Suggestion { request_id } => {
-                assert_eq!(request_id, "request-123");
+            Commands::List(_) => {}
+            _ => panic!("expected list command"),
+        }
+    }
+
+    #[test]
+    fn parses_search_command_happy_path() {
+        let cli = Cli::try_parse_from(["plankton", "search", "dev"])
+            .expect("search command should parse");
+
+        match cli.command {
+            Commands::Search(args) => {
+                assert_eq!(args.query, "dev");
             }
-            _ => panic!("expected suggestion command"),
+            _ => panic!("expected search command"),
         }
     }
 
@@ -1806,17 +1816,27 @@ mod tests {
     fn help_text_marks_cli_as_read_only() {
         let mut command = Cli::command();
         let help = command.render_long_help().to_string();
-        let subcommands = Cli::command()
-            .get_subcommands()
-            .map(|command| command.get_name().to_string())
-            .collect::<Vec<_>>();
 
-        assert!(help.contains("Human approvals happen in the desktop UI."));
-        assert!(help.contains("read-only"));
-        assert!(!subcommands.iter().any(|name| name == "approve"));
-        assert!(!subcommands.iter().any(|name| name == "reject"));
+        assert!(help.contains("desktop UI"));
+        assert!(help.contains("`get`, `list`, and `search`"));
+        assert!(help.contains("\n  get"));
+        assert!(help.contains("\n  list"));
+        assert!(help.contains("\n  search"));
+        assert!(!help.contains("\n  status"));
+        assert!(!help.contains("\n  suggestion"));
+        assert!(!help.contains("\n  queue"));
+        assert!(!help.contains("\n  audit"));
         assert!(!help.contains("approve <request-id>"));
         assert!(!help.contains("reject <request-id>"));
+    }
+
+    #[test]
+    fn rejects_removed_management_commands() {
+        for command in ["status", "suggestion", "queue", "audit"] {
+            let error = Cli::try_parse_from(["plankton", command])
+                .expect_err("removed management command should not parse");
+            assert!(error.to_string().contains("unrecognized subcommand"));
+        }
     }
 
     #[test]
@@ -1832,6 +1852,32 @@ mod tests {
         assert!(get_help.contains("[default: human-review]"));
         assert!(get_help.contains("[possible values: human-review, auto, assisted]"));
         assert!(!get_help.contains("manual-only"));
+    }
+
+    #[test]
+    fn list_help_describes_identifier_inventory() {
+        let mut command = Cli::command();
+        let list_help = command
+            .find_subcommand_mut("list")
+            .expect("list subcommand should exist")
+            .render_long_help()
+            .to_string();
+
+        assert!(list_help.contains("resource identifiers"));
+        assert!(list_help.contains("without revealing secret values"));
+    }
+
+    #[test]
+    fn search_help_describes_fuzzy_identifier_matching() {
+        let mut command = Cli::command();
+        let search_help = command
+            .find_subcommand_mut("search")
+            .expect("search subcommand should exist")
+            .render_long_help()
+            .to_string();
+
+        assert!(search_help.contains("Case-insensitive fuzzy match"));
+        assert!(search_help.contains("resource identifiers"));
     }
 
     #[test]
@@ -2263,6 +2309,143 @@ mod tests {
                     .map(|decision| decision.provider_called)
                     == Some(Some(false))
         }));
+    }
+
+    #[tokio::test]
+    async fn wait_for_terminal_request_blocks_until_human_review_resolves() {
+        let temp = tempdir().expect("temp directory should be created");
+        let mut settings = load_settings().expect("default settings should load");
+        settings.database_url = format!("sqlite://{}", temp.path().join("plankton.db").display());
+
+        let store = SqliteStore::new(&settings)
+            .await
+            .expect("store should initialize");
+
+        let request = store
+            .submit_request(
+                &settings,
+                RequestContext::new(
+                    "secret/manual-token".to_string(),
+                    "Need manual access".to_string(),
+                    "alice".to_string(),
+                ),
+                PolicyMode::ManualOnly,
+            )
+            .await
+            .expect("request should be inserted");
+
+        let decision_store = store.clone();
+        let decision_request_id = request.id.clone();
+        tokio::spawn(async move {
+            sleep(Duration::from_millis(50)).await;
+            decision_store
+                .record_decision(
+                    &decision_request_id,
+                    Decision::Allow,
+                    "reviewer",
+                    Some("approved".to_string()),
+                )
+                .await
+                .expect("decision should persist");
+        });
+
+        let result = timeout(
+            Duration::from_secs(2),
+            wait_for_terminal_request(&store, &request.id),
+        )
+        .await
+        .expect("manual review should eventually resolve")
+        .expect("terminal request query should succeed");
+
+        assert_eq!(result.request.approval_status, ApprovalStatus::Approved);
+        assert_eq!(result.request.final_decision, Some(Decision::Allow));
+        assert!(result
+            .audit_records
+            .iter()
+            .any(|record| record.action == AuditAction::ApprovalRecorded));
+    }
+
+    #[tokio::test]
+    async fn wait_for_terminal_request_returns_immediately_for_auto_allow() {
+        let temp = tempdir().expect("temp directory should be created");
+        let mut settings = load_settings().expect("default settings should load");
+        settings.database_url = format!("sqlite://{}", temp.path().join("plankton.db").display());
+        settings.provider_kind = "mock".to_string();
+
+        let store = SqliteStore::new(&settings)
+            .await
+            .expect("store should initialize");
+
+        let mut context = RequestContext::new(
+            "secret/auto-token".to_string(),
+            "Need automatic access".to_string(),
+            "alice".to_string(),
+        );
+        context
+            .metadata
+            .insert("environment".to_string(), "dev".to_string());
+
+        let request = store
+            .submit_request(&settings, context, PolicyMode::LlmAutomatic)
+            .await
+            .expect("automatic request should be inserted");
+
+        let result = timeout(
+            Duration::from_millis(250),
+            wait_for_terminal_request(&store, &request.id),
+        )
+        .await
+        .expect("automatic allow should not block")
+        .expect("terminal request query should succeed");
+
+        assert_eq!(result.request.approval_status, ApprovalStatus::Approved);
+        assert_eq!(result.request.final_decision, Some(Decision::Allow));
+    }
+
+    #[test]
+    fn renders_accessible_resource_list_as_identifiers_only() {
+        let resources = vec![AccessibleResourceRecord {
+            resource: "secret/dev-token".to_string(),
+            granted_by_request_id: "req-123".to_string(),
+            policy_mode: PolicyMode::Assisted,
+            provider_kind: Some("mock".to_string()),
+            granted_at: chrono::Utc::now(),
+        }];
+
+        let rendered = render_accessible_resource_list_text(&resources);
+        let output = build_accessible_resource_list_output(&resources);
+
+        assert!(rendered.contains("resource: secret/dev-token"));
+        assert!(rendered.contains("granted_by_request_id: req-123"));
+        assert!(rendered.contains("policy_mode: assisted"));
+        assert!(!rendered.contains("secret_value"));
+        assert_eq!(output.resource_count, 1);
+        assert_eq!(output.resources[0].resource, "secret/dev-token");
+    }
+
+    #[test]
+    fn filters_accessible_resources_by_case_insensitive_resource_substring() {
+        let resources = vec![
+            AccessibleResourceRecord {
+                resource: "secret/dev-token".to_string(),
+                granted_by_request_id: "req-123".to_string(),
+                policy_mode: PolicyMode::Assisted,
+                provider_kind: Some("mock".to_string()),
+                granted_at: chrono::Utc::now(),
+            },
+            AccessibleResourceRecord {
+                resource: "config/prod-readonly".to_string(),
+                granted_by_request_id: "req-456".to_string(),
+                policy_mode: PolicyMode::ManualOnly,
+                provider_kind: None,
+                granted_at: chrono::Utc::now(),
+            },
+        ];
+
+        let filtered = filter_accessible_resources(&resources, "DEV");
+
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].resource, "secret/dev-token");
     }
 
     #[test]

@@ -34,6 +34,31 @@ export type SuggestionTraceView = {
   provider_trace: ProviderTrace | null;
 };
 
+export type SuggestionSummaryView = {
+  provider_kind: string | null;
+  provider_model: string | null;
+  suggested_decision: string | null;
+  rationale_summary: string | null;
+  risk_score: number | null;
+  template_version: string | null;
+  generated_at: string;
+  error: string | null;
+};
+
+export type ResolvedReviewRequestView = {
+  request_id: string;
+  resource: string | null;
+  reason: string | null;
+  requested_by: string | null;
+  policy_mode: string | null;
+  submitted_at: string | null;
+  recorded_at: string;
+  approval_status: string | null;
+  final_decision: string | null;
+  reviewed_by: string | null;
+  decision_note: string | null;
+};
+
 export function escapeHtml(value: string): string {
   return value
     .replace(/&/g, "&amp;")
@@ -176,6 +201,54 @@ function readUsageTotalTokens(value: unknown): number | null {
   return readNullableNumber(record.total_tokens);
 }
 
+function parseSuggestionSummary(
+  record: AuditRecord,
+): SuggestionSummaryView | null {
+  if (
+    record.action !== "llm_suggestion_generated" &&
+    record.action !== "llm_suggestion_failed"
+  ) {
+    return null;
+  }
+
+  const providerKind =
+    record.actor.trim().length > 0
+      ? record.actor
+      : readString(record.payload.provider_kind);
+  const providerModel = readString(record.payload.provider_model);
+  const suggestedDecision = readString(record.payload.suggested_decision);
+  const rationaleSummary =
+    record.action === "llm_suggestion_generated" ? record.note : null;
+  const error =
+    record.action === "llm_suggestion_failed"
+      ? (record.note ?? readString(record.payload.error))
+      : readString(record.payload.error);
+  const riskScore = readNullableNumber(record.payload.risk_score);
+  const templateVersion = readString(record.payload.template_version);
+
+  if (
+    !providerKind &&
+    !providerModel &&
+    !suggestedDecision &&
+    !rationaleSummary &&
+    riskScore === null &&
+    !error
+  ) {
+    return null;
+  }
+
+  return {
+    provider_kind: providerKind,
+    provider_model: providerModel,
+    suggested_decision: suggestedDecision,
+    rationale_summary: rationaleSummary,
+    risk_score: riskScore,
+    template_version: templateVersion,
+    generated_at: record.created_at,
+    error,
+  };
+}
+
 function parseAutomaticDecision(record: AuditRecord):
   | (AutomaticDecisionTrace & {
       approval_status: string | null;
@@ -265,6 +338,69 @@ export function getResolvedAutoDecisionEntries(
   }
 
   return results;
+}
+
+export function getResolvedReviewRequestEntries(
+  records: AuditRecord[],
+): ResolvedReviewRequestView[] {
+  const sortedRecords = [...records].sort(
+    (left, right) => Date.parse(right.created_at) - Date.parse(left.created_at),
+  );
+  const submissions = new Map<string, AuditRecord>();
+  const results: ResolvedReviewRequestView[] = [];
+  const seenRequestIds = new Set<string>();
+
+  for (const record of sortedRecords) {
+    if (record.action === "request_submitted") {
+      submissions.set(record.request_id, record);
+    }
+  }
+
+  for (const record of sortedRecords) {
+    if (
+      record.action !== "approval_recorded" ||
+      record.actor === "system_auto" ||
+      seenRequestIds.has(record.request_id)
+    ) {
+      continue;
+    }
+
+    const submission = submissions.get(record.request_id);
+
+    results.push({
+      request_id: record.request_id,
+      resource: readString(submission?.payload.resource),
+      reason: submission?.note ?? null,
+      requested_by: submission?.actor ?? null,
+      policy_mode: readString(submission?.payload.policy_mode),
+      submitted_at: submission?.created_at ?? null,
+      recorded_at: record.created_at,
+      approval_status: readString(record.payload.approval_status),
+      final_decision: readString(record.payload.decision),
+      reviewed_by: record.actor || null,
+      decision_note: record.note ?? null,
+    });
+    seenRequestIds.add(record.request_id);
+  }
+
+  return results;
+}
+
+export function getSuggestionSummary(
+  records: AuditRecord[],
+): SuggestionSummaryView | null {
+  const suggestionRecord = [...records]
+    .sort(
+      (left, right) =>
+        Date.parse(right.created_at) - Date.parse(left.created_at),
+    )
+    .find(
+      (record) =>
+        record.action === "llm_suggestion_generated" ||
+        record.action === "llm_suggestion_failed",
+    );
+
+  return suggestionRecord ? parseSuggestionSummary(suggestionRecord) : null;
 }
 
 export function getSuggestionTrace(

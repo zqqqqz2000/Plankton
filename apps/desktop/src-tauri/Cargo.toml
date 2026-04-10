@@ -15,8 +15,12 @@ plankton-core = { path = "../../../crates/plankton-core" }
 plankton-store = { path = "../../../crates/plankton-store" }
 anyhow.workspace = true
 serde.workspace = true
+serde_json.workspace = true
 tauri.workspace = true
+tauri-plugin-deep-link = "2.4.8"
 tauri-plugin-log.workspace = true
+tauri-plugin-single-instance = { version = "2.4.1", features = ["deep-link"] }
 tokio.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
+url = "2.5"

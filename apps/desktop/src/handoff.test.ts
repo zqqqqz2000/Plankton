@@ -1,0 +1,53 @@
+import { describe, expect, it } from "vitest";
+
+import {
+  normalizeHandoffRequestId,
+  resolvePendingHandoffRequestId,
+} from "./handoff";
+import type { DashboardData } from "./types";
+
+const dashboard: DashboardData = {
+  pending_requests: [
+    {
+      id: "request-123",
+      context: {
+        resource: "secret/demo",
+        reason: "Need access",
+        requested_by: "alice",
+        script_path: null,
+        call_chain: [],
+        env_vars: {},
+        metadata: {},
+        created_at: "2026-04-10T00:00:00Z",
+      },
+      policy_mode: "manual_only",
+      approval_status: "pending",
+      final_decision: null,
+      provider_kind: null,
+      rendered_prompt: "",
+      llm_suggestion: null,
+      automatic_decision: null,
+      created_at: "2026-04-10T00:00:00Z",
+      updated_at: "2026-04-10T00:00:00Z",
+      resolved_at: null,
+    },
+  ],
+  recent_audit_records: [],
+};
+
+describe("handoff selection", () => {
+  it("normalizes request ids", () => {
+    expect(normalizeHandoffRequestId("  request-123  ")).toBe("request-123");
+    expect(normalizeHandoffRequestId("   ")).toBeNull();
+  });
+
+  it("resolves a pending request id when it exists", () => {
+    expect(resolvePendingHandoffRequestId(dashboard, "request-123")).toBe(
+      "request-123",
+    );
+  });
+
+  it("returns null when the handoff request is not in the queue yet", () => {
+    expect(resolvePendingHandoffRequestId(dashboard, "request-999")).toBeNull();
+  });
+});

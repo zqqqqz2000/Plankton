@@ -2,7 +2,7 @@
 
 # Plankton
 
-Plankton 是一个面向敏感资源访问的本地优先审批控制台。桌面 UI 是策略配置面和人工审批面，CLI 则是操作者与 LLM 发起访问尝试、查询状态和读取审计信息的入口。
+Plankton 是一个面向敏感资源访问的本地优先审批控制台。桌面 UI 是策略配置面和人工审批面，CLI 则是操作者与 LLM 列出、搜索可用资源标识并发起访问请求的入口。
 
 Powered by OpenAquarium
 
@@ -42,9 +42,25 @@ make tauri-dev
 - `assisted` 会先向 provider 获取建议，再由桌面 UI 中的人类做最终决定。
 - `auto` 会在本地护栏和 provider 建议的基础上自动得到 allow、deny 或 escalate，同时让结果在 UI 和 CLI 中都可见。
 
-### 5. 用 CLI 发起访问尝试并做只读查询
+### 5. 用 CLI 列出、搜索标识并发起访问请求
 
-用安装后的命令发起一次访问尝试：
+先列出当前可供本地 LLM 请求的资源标识：
+
+```bash
+plankton list
+```
+
+这个命令只会输出标识和必要元信息，不会直接打印密钥值。
+
+如果你只想在同一批标识里做模糊搜索，可以直接运行：
+
+```bash
+plankton search api-token
+```
+
+`search` 只会对 `list` 同一资源标识视图做模糊匹配，返回的仍然只是标识和必要元信息，不会输出密钥值。
+
+再用安装后的命令请求其中一个资源：
 
 ```bash
 plankton get secret/api-token \
@@ -52,16 +68,7 @@ plankton get secret/api-token \
   --requested-by alice
 ```
 
-在 CLI 中查询同一条请求：
-
-```bash
-plankton queue
-plankton status <request-id>
-plankton suggestion <request-id>
-plankton audit --limit 20
-```
-
-`queue` 是当前的列表式查询入口。人工审批不在这里完成，而是在桌面 UI 中完成。
+如果这次请求不能自动完成，Plankton 会把流程交给桌面 UI。人工审批、建议查看和审计查看都在 UI 中完成。
 
 如果你当前是在源码仓库里做本地开发，而不是使用 cask 安装，可以把同样的命令换成 `cargo run -p plankton -- ...`。
 
@@ -96,7 +103,7 @@ export PLANKTON_CLAUDE_MODEL=...
 ## UI 与 CLI 的分工
 
 - UI 负责策略配置和人工审批。
-- CLI 负责发起访问尝试和读取状态，不承担常规的人类审批职责。
+- CLI 负责列出、搜索资源标识和发起访问请求，不承担人工审批或审计管理职责。
 - 如果仓库里仍然能看到 `approve` 或 `reject`，应把它们视为内部或遗留兼容路径，而不是面向用户的主流程。
 
 ## 延伸阅读
@@ -110,5 +117,5 @@ export PLANKTON_CLAUDE_MODEL=...
 - 每一次访问都会先变成一条显式请求，而不是隐式副作用。
 - 在 provider 看到上下文之前，敏感信息会先被裁剪和脱敏。
 - 即使启用了 provider，本地护栏仍然是最终的安全边界。
-- 同一条请求会同时出现在桌面 UI 和 CLI 的共享审计链路中，因此可以被复盘和解释。
+- 每一条请求的详细审批与审计链路都由桌面 UI 承接和解释。
 - 当上下文不完整、provider 返回非法结果或触发风险边界时，系统会默认 fail-closed。

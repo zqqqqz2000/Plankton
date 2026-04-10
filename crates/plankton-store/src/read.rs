@@ -491,12 +491,10 @@ mod tests {
 
         assert!(status.request.provider_input.is_some());
         assert!(status.request.llm_suggestion.is_some());
-        assert!(
-            status
-                .audit_records
-                .iter()
-                .any(|record| record.action == AuditAction::LlmSuggestionGenerated)
-        );
+        assert!(status
+            .audit_records
+            .iter()
+            .any(|record| record.action == AuditAction::LlmSuggestionGenerated));
     }
 
     #[tokio::test]

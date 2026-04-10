@@ -5,7 +5,7 @@ This runbook is the command-level path for validating the current P1 scope.
 The accepted primary flow is:
 
 ```text
-CLI get -> desktop approve/reject -> CLI status/suggestion/audit
+CLI list/search -> CLI get -> desktop approve/reject when needed
 ```
 
 ## Prerequisites
@@ -78,7 +78,32 @@ make tauri-dev
 
 Keep the desktop app running.
 
-### 2. Create a pending request
+### 2. List or search available resource identifiers
+
+From another terminal:
+
+```bash
+cargo run -p plankton -- list
+```
+
+Expected result:
+
+- the CLI prints resource identifiers and minimal metadata only
+- no secret value is printed
+
+If you want to narrow that same view before requesting one resource:
+
+```bash
+cargo run -p plankton -- search api-key
+```
+
+Expected result:
+
+- the CLI returns a filtered subset of the same identifier view used by `list`
+- matching is fuzzy on the resource identifier
+- no secret value is printed
+
+### 3. Request one resource
 
 From another terminal:
 
@@ -93,29 +118,12 @@ cargo run -p plankton -- get secret/api-key \
 
 Expected result:
 
-- the CLI prints JSON for the new request
+- the CLI prints JSON for the request lifecycle
 - the JSON includes a request `id`
-- `approval_status` is `pending`
-- `final_decision` is `null`
+- if the request needs review, Plankton hands off to the desktop UI and keeps the request pending until a final decision is recorded
+- when the command returns, the response includes the final `approval_status` and `final_decision`
 
-### 3. Verify the request is pending
-
-Use the CLI:
-
-```bash
-cargo run -p plankton -- queue
-cargo run -p plankton -- status <request-id>
-cargo run -p plankton -- suggestion <request-id>
-```
-
-Expected result:
-
-- the queue contains the new request
-- `status` returns the request plus audit records
-- `suggestion` remains part of the read-only inspection surface
-- the request is still pending until a desktop decision is recorded
-
-### 4. Approve or reject in the desktop UI
+### 4. Approve or reject in the desktop UI when review is required
 
 In the Tauri app:
 
@@ -129,40 +137,35 @@ Expected result:
 - the request disappears from the pending queue after resolution
 - the recent audit trail shows the action
 
-### 5. Verify the final state from the CLI
+### 5. Verify the final state
 
-Back in the terminal:
-
-```bash
-cargo run -p plankton -- status <request-id>
-cargo run -p plankton -- audit --limit 20
-```
+Back in the terminal output and desktop UI:
 
 Expected result after approval:
 
 - `approval_status` is `approved`
 - `final_decision` is `allow`
-- the audit trail contains a submission event and an approval event
+- the desktop request audit shows the submission event and the approval event
 
 Expected result after rejection:
 
 - `approval_status` is `rejected`
 - `final_decision` is `deny`
-- the audit trail contains a submission event and a rejection event
+- the desktop request audit shows the submission event and the rejection event
 
 ## Evidence checker should capture
 
 - successful exit for `make fmt-check`, `make check`, `make build`, `make test`, and when needed `make desktop-build`
-- CLI JSON showing a newly created request ID
+- CLI `list` output showing resource identifiers without secret values
+- CLI `search` output showing filtered identifiers without secret values
+- CLI JSON showing a newly created request ID and final decision fields
 - the same request visible in the desktop queue
 - desktop approval or rejection action recorded in the UI
-- CLI `status` output after the decision
-- CLI `suggestion` output when the checker needs the read-only explanation surface
-- CLI `audit` output showing the decision trail
+- desktop detail and request audit views after the decision
 
 ## Current P1 limits
 
 - the live flow is Human Review only
 - provider support is intentionally a thin interface plus mock placeholder
 - policy modes exist in shared types, but automatic and assisted execution paths are not active
-- the CLI surface for P1 is request submission plus read-only inspection, while user-facing approval remains a desktop UI path
+- the CLI surface for P1 is resource listing, identifier search, and request submission, while user-facing approval and audit remain desktop UI paths

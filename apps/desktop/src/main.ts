@@ -1,17 +1,26 @@
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 
 import {
   escapeHtml,
   getDashboardSummary,
   getRequestAuditRecords,
   getResolvedAutoDecisionEntries,
+  getResolvedReviewRequestEntries,
   getSelectedRequest,
+  getSuggestionSummary,
   getSuggestionTrace,
   toKeyValueEntries,
   type ResolvedAutoDecisionView,
+  type ResolvedReviewRequestView,
+  type SuggestionSummaryView,
   type SuggestionTraceView,
 } from "./dashboardModel";
 import { formatElapsed, formatShortId, formatTimestamp } from "./formatters";
+import {
+  normalizeHandoffRequestId,
+  resolvePendingHandoffRequestId,
+} from "./handoff";
 import {
   DEFAULT_LOCALE,
   LOCALE_STORAGE_KEY,
@@ -33,11 +42,19 @@ import type {
 } from "./types";
 
 const AUTO_REFRESH_MS = 5_000;
+const HANDOFF_EVENT = "plankton://handoff-request";
 
 type BadgeTone = "pending" | "approved" | "rejected" | "neutral";
+type HandoffPayload = {
+  request_id: string;
+};
 type DetailSelection =
   | {
       kind: "pending_request";
+      id: string;
+    }
+  | {
+      kind: "resolved_request";
       id: string;
     }
   | {
@@ -49,6 +66,7 @@ type DetailSelection =
 const state: {
   dashboard: DashboardData | null;
   locale: Locale;
+  pendingHandoffRequestId: string | null;
   selectedDetail: DetailSelection;
   noteDraft: string;
   errorMessage: string | null;
@@ -60,6 +78,7 @@ const state: {
 } = {
   dashboard: null,
   locale: getInitialLocale(),
+  pendingHandoffRequestId: null,
   selectedDetail: null,
   noteDraft: "",
   errorMessage: null,
@@ -163,10 +182,37 @@ function getSelectedResolvedAutoDecision(
   return entries.find((entry) => entry.request_id === selection.id) ?? null;
 }
 
+function getSelectedResolvedReviewRequest(
+  entries: ResolvedReviewRequestView[],
+  selection: DetailSelection,
+): ResolvedReviewRequestView | null {
+  if (selection?.kind !== "resolved_request") {
+    return null;
+  }
+
+  return entries.find((entry) => entry.request_id === selection.id) ?? null;
+}
+
 function syncSelection(dashboard: DashboardData): void {
+  const resolvedReviewEntries = getResolvedReviewRequestEntries(
+    dashboard.recent_audit_records,
+  );
   const resolvedAutoEntries = getResolvedAutoDecisionEntries(
     dashboard.recent_audit_records,
   );
+  const handoffRequestId = resolvePendingHandoffRequestId(
+    dashboard,
+    state.pendingHandoffRequestId,
+  );
+  if (handoffRequestId) {
+    state.selectedDetail = {
+      kind: "pending_request",
+      id: handoffRequestId,
+    };
+    state.pendingHandoffRequestId = null;
+    return;
+  }
+
   const selectedPendingRequest =
     state.selectedDetail?.kind === "pending_request"
       ? getSelectedRequest(dashboard, state.selectedDetail.id)
@@ -175,11 +221,23 @@ function syncSelection(dashboard: DashboardData): void {
     resolvedAutoEntries,
     state.selectedDetail,
   );
+  const selectedResolvedReview = getSelectedResolvedReviewRequest(
+    resolvedReviewEntries,
+    state.selectedDetail,
+  );
 
   if (selectedPendingRequest) {
     state.selectedDetail = {
       kind: "pending_request",
       id: selectedPendingRequest.id,
+    };
+    return;
+  }
+
+  if (selectedResolvedReview) {
+    state.selectedDetail = {
+      kind: "resolved_request",
+      id: selectedResolvedReview.request_id,
     };
     return;
   }
@@ -201,6 +259,15 @@ function syncSelection(dashboard: DashboardData): void {
     return;
   }
 
+  const firstResolvedReview = resolvedReviewEntries[0];
+  if (firstResolvedReview) {
+    state.selectedDetail = {
+      kind: "resolved_request",
+      id: firstResolvedReview.request_id,
+    };
+    return;
+  }
+
   const firstResolvedAuto = resolvedAutoEntries[0];
   state.selectedDetail = firstResolvedAuto
     ? {
@@ -208,6 +275,19 @@ function syncSelection(dashboard: DashboardData): void {
         id: firstResolvedAuto.request_id,
       }
     : null;
+}
+
+function queueHandoffRequest(requestId: string | null | undefined): void {
+  const normalizedRequestId = normalizeHandoffRequestId(requestId);
+  if (!normalizedRequestId) {
+    return;
+  }
+
+  state.pendingHandoffRequestId = normalizedRequestId;
+  state.noteDraft = "";
+  state.errorMessage = null;
+  render();
+  void loadDashboard();
 }
 
 function renderBadge(
@@ -533,6 +613,100 @@ function renderSuggestionBlock(suggestion: LlmSuggestion | null): string {
   `;
 }
 
+function renderResolvedSuggestionBlock(
+  suggestion: SuggestionSummaryView | null,
+): string {
+  if (!suggestion) {
+    return "";
+  }
+
+  const providerLabel = suggestion.provider_model
+    ? `${suggestion.provider_kind ? label(suggestion.provider_kind) : text("provider")} / ${suggestion.provider_model}`
+    : suggestion.provider_kind
+      ? label(suggestion.provider_kind)
+      : text("notAvailable");
+  const metaParts = [
+    providerLabel,
+    suggestion.template_version
+      ? text("templateVersion", { version: suggestion.template_version })
+      : text("notAvailable"),
+    timestampLabel(suggestion.generated_at, "unknown"),
+  ];
+
+  return `
+    <section
+      class="detail-section detail-section-accent"
+      data-testid="resolved-review-suggestion-card"
+    >
+      <div
+        class="detail-section-header"
+        data-testid="resolved-review-suggestion-card-header"
+      >
+        <h3>${escapeHtml(text("suggestion"))}</h3>
+        <span data-testid="resolved-review-suggestion-provider">
+          ${escapeHtml(providerLabel)}
+        </span>
+      </div>
+      <div class="badge-row" data-testid="resolved-review-suggestion-badges">
+        ${
+          suggestion.suggested_decision
+            ? renderBadge(
+                label(suggestion.suggested_decision),
+                getDecisionTone(suggestion.suggested_decision),
+                {
+                  testId: "resolved-review-suggestion-decision",
+                  value: suggestion.suggested_decision,
+                  kind: "suggested_decision",
+                },
+              )
+            : ""
+        }
+        ${
+          suggestion.risk_score === null
+            ? ""
+            : renderBadge(
+                text("riskLabel", { score: suggestion.risk_score }),
+                "neutral",
+                {
+                  testId: "resolved-review-suggestion-risk",
+                  value: String(suggestion.risk_score),
+                  kind: "risk_score",
+                },
+              )
+        }
+      </div>
+      ${
+        suggestion.rationale_summary
+          ? `<p class="suggestion-summary" data-testid="resolved-review-suggestion-rationale">${escapeHtml(
+              suggestion.rationale_summary,
+            )}</p>`
+          : ""
+      }
+      ${
+        suggestion.error
+          ? `<p class="suggestion-error" data-testid="resolved-review-suggestion-error">${escapeHtml(
+              suggestion.error,
+            )}</p>`
+          : ""
+      }
+      <div class="suggestion-meta" data-testid="resolved-review-suggestion-meta">
+        ${metaParts
+          .map(
+            (part, index) => `
+              <span
+                data-testid="resolved-review-suggestion-meta-item"
+                data-meta-index="${index}"
+              >
+                ${escapeHtml(part)}
+              </span>
+            `,
+          )
+          .join("")}
+      </div>
+    </section>
+  `;
+}
+
 function isAcpTrace(
   providerKind: string | null,
   providerTrace: ProviderTrace | null,
@@ -827,6 +1001,12 @@ function getResolvedAutoTitle(entry: ResolvedAutoDecisionView): string {
   );
 }
 
+function getResolvedReviewTitle(entry: ResolvedReviewRequestView): string {
+  return (
+    entry.resource ?? `${text("request")} ${formatShortId(entry.request_id)}`
+  );
+}
+
 function renderQueue(selectedRequestId: string | null): string {
   if (state.isLoading && !state.dashboard) {
     return `<p class="empty" data-testid="pending-queue-loading">${escapeHtml(
@@ -926,6 +1106,67 @@ function renderResolvedAutoList(
           }
           <div class="queue-item-meta" data-testid="resolved-auto-item-meta">
             <span>${escapeHtml(entry.requested_by ?? text("system"))}</span>
+            <span>${escapeHtml(elapsedLabel(entry.recorded_at))}</span>
+          </div>
+        </button>
+      `;
+    })
+    .join("");
+}
+
+function renderResolvedReviewList(
+  entries: ResolvedReviewRequestView[],
+  selectedRequestId: string | null,
+): string {
+  if (entries.length === 0) {
+    return `<p class="empty" data-testid="resolved-review-results-empty">${escapeHtml(
+      text("noRecentDecisions"),
+    )}</p>`;
+  }
+
+  return entries
+    .map((entry) => {
+      const isActive = entry.request_id === selectedRequestId;
+
+      return `
+        <button
+          class="queue-item ${isActive ? "active" : ""}"
+          data-select-resolved-request="${escapeHtml(entry.request_id)}"
+          data-testid="resolved-review-item"
+          data-request-id="${escapeHtml(entry.request_id)}"
+          data-selected="${isActive ? "true" : "false"}"
+          aria-pressed="${isActive ? "true" : "false"}"
+          aria-label="${escapeHtml(
+            text("selectResolvedRequestAria", { id: entry.request_id }),
+          )}"
+          type="button"
+        >
+          <div class="queue-item-header" data-testid="resolved-review-item-header">
+            <strong>${escapeHtml(getResolvedReviewTitle(entry))}</strong>
+            ${renderBadge(
+              decisionLabel(entry.final_decision ?? entry.approval_status),
+              getDecisionTone(entry.final_decision ?? entry.approval_status),
+              {
+                testId: "resolved-review-item-status",
+                value: entry.final_decision ?? entry.approval_status,
+                kind: "final_decision",
+              },
+            )}
+          </div>
+          ${
+            entry.reason
+              ? `<p class="queue-item-reason" data-testid="resolved-review-item-reason">${escapeHtml(
+                  entry.reason,
+                )}</p>`
+              : ""
+          }
+          <div class="queue-item-meta" data-testid="resolved-review-item-meta">
+            <span>${escapeHtml(entry.requested_by ?? text("system"))}</span>
+            <span>${escapeHtml(
+              entry.policy_mode
+                ? label(entry.policy_mode)
+                : text("notAvailable"),
+            )}</span>
             <span>${escapeHtml(elapsedLabel(entry.recorded_at))}</span>
           </div>
         </button>
@@ -1274,10 +1515,184 @@ function renderResolvedAutoDetail(
   `;
 }
 
+function renderResolvedReviewDetail(
+  selectedResult: ResolvedReviewRequestView | null,
+): string {
+  if (!selectedResult) {
+    return `
+      <div class="detail-empty-state" data-testid="request-detail-empty-state">
+        <h2>${escapeHtml(text("noPendingRequest"))}</h2>
+      </div>
+    `;
+  }
+
+  const selectedAuditRecords = getRequestAuditRecords(
+    state.dashboard?.recent_audit_records ?? [],
+    selectedResult.request_id,
+  );
+  const suggestionSummary = getSuggestionSummary(selectedAuditRecords);
+  const suggestionTrace = getSuggestionTrace(selectedAuditRecords);
+  const providerLabel = suggestionSummary?.provider_model
+    ? `${suggestionSummary.provider_kind ? label(suggestionSummary.provider_kind) : text("provider")} / ${suggestionSummary.provider_model}`
+    : suggestionSummary?.provider_kind
+      ? label(suggestionSummary.provider_kind)
+      : text("notAvailable");
+  const decisionValue =
+    selectedResult.final_decision ?? selectedResult.approval_status;
+  const statusValue =
+    selectedResult.approval_status ?? selectedResult.final_decision;
+
+  return `
+    <div class="detail-header" data-testid="resolved-review-detail-header">
+      <div class="detail-title-group">
+        <h2>${escapeHtml(getResolvedReviewTitle(selectedResult))}</h2>
+        ${
+          selectedResult.reason
+            ? `<p class="detail-reason" data-testid="resolved-review-reason">${escapeHtml(
+                selectedResult.reason,
+              )}</p>`
+            : ""
+        }
+        <div class="detail-meta" data-testid="resolved-review-detail-overview">
+          <span data-testid="resolved-review-requester">
+            ${escapeHtml(selectedResult.requested_by ?? text("system"))}
+          </span>
+          <span data-testid="resolved-review-recorded-at">
+            ${escapeHtml(elapsedLabel(selectedResult.recorded_at))}
+          </span>
+          <span class="id-pill" data-testid="resolved-review-request-id-pill">
+            ${escapeHtml(formatShortId(selectedResult.request_id))}
+          </span>
+        </div>
+      </div>
+      <div class="badge-row" data-testid="resolved-review-detail-badges">
+        ${renderBadge(
+          label(statusValue ?? "pending"),
+          getDecisionTone(statusValue),
+          {
+            testId: "resolved-review-approval-status",
+            value: statusValue,
+            kind: "approval_status",
+          },
+        )}
+        ${renderBadge(
+          decisionLabel(decisionValue),
+          getDecisionTone(decisionValue),
+          {
+            testId: "resolved-review-final-decision",
+            value: decisionValue,
+            kind: "final_decision",
+          },
+        )}
+      </div>
+    </div>
+
+    <div class="detail-grid">
+      <section
+        class="detail-section"
+        data-testid="resolved-review-decision-card"
+      >
+        <div
+          class="detail-section-header"
+          data-testid="resolved-review-decision-card-header"
+        >
+          <h3>${escapeHtml(text("decision"))}</h3>
+          <span data-testid="resolved-review-reviewed-by">
+            ${escapeHtml(selectedResult.reviewed_by ?? text("notAvailable"))}
+          </span>
+        </div>
+        <dl class="facts" data-testid="resolved-review-decision-facts">
+          <div data-testid="resolved-review-fact-submitted">
+            <dt>${escapeHtml(text("submitted"))}</dt>
+            <dd>${escapeHtml(timestampLabel(selectedResult.submitted_at, "unknown"))}</dd>
+          </div>
+          <div data-testid="resolved-review-fact-resolved">
+            <dt>${escapeHtml(text("resolved"))}</dt>
+            <dd>${escapeHtml(timestampLabel(selectedResult.recorded_at, "unknown"))}</dd>
+          </div>
+        </dl>
+        ${
+          selectedResult.decision_note
+            ? `<p class="suggestion-summary" data-testid="resolved-review-decision-note">${escapeHtml(
+                selectedResult.decision_note,
+              )}</p>`
+            : ""
+        }
+      </section>
+
+      <section
+        class="detail-section"
+        data-testid="resolved-review-summary-card"
+      >
+        <div
+          class="detail-section-header"
+          data-testid="resolved-review-summary-card-header"
+        >
+          <h3>${escapeHtml(text("summary"))}</h3>
+          <span data-testid="resolved-review-policy-mode">
+            ${escapeHtml(
+              selectedResult.policy_mode
+                ? label(selectedResult.policy_mode)
+                : text("notAvailable"),
+            )}
+          </span>
+        </div>
+        <dl class="facts" data-testid="resolved-review-facts-list">
+          <div data-testid="resolved-review-fact-created">
+            <dt>${escapeHtml(text("created"))}</dt>
+            <dd>${escapeHtml(timestampLabel(selectedResult.submitted_at, "unknown"))}</dd>
+          </div>
+          <div data-testid="resolved-review-fact-recorded">
+            <dt>${escapeHtml(text("recorded"))}</dt>
+            <dd>${escapeHtml(timestampLabel(selectedResult.recorded_at, "unknown"))}</dd>
+          </div>
+          <div data-testid="resolved-review-fact-provider">
+            <dt>${escapeHtml(text("provider"))}</dt>
+            <dd>${escapeHtml(providerLabel)}</dd>
+          </div>
+          <div data-testid="resolved-review-fact-requester">
+            <dt>${escapeHtml(text("request"))}</dt>
+            <dd>${escapeHtml(selectedResult.requested_by ?? text("notAvailable"))}</dd>
+          </div>
+        </dl>
+      </section>
+
+      ${renderResolvedSuggestionBlock(suggestionSummary)}
+      ${renderAcpTraceBlock(suggestionTrace)}
+      ${renderClaudeTraceBlock(suggestionTrace)}
+
+      <section
+        class="detail-section detail-section-wide"
+        data-testid="resolved-review-audit-card"
+      >
+        <div
+          class="detail-section-header"
+          data-testid="resolved-review-audit-card-header"
+        >
+          <h3>${escapeHtml(text("requestAudit"))}</h3>
+          <span data-testid="resolved-review-audit-count">
+            ${escapeHtml(
+              text("eventCount", { count: selectedAuditRecords.length }),
+            )}
+          </span>
+        </div>
+        ${renderAuditList(
+          selectedAuditRecords,
+          text("noRequestAudit"),
+          "resolved-review-audit-list",
+        )}
+      </section>
+    </div>
+  `;
+}
+
 function render(): void {
   document.documentElement.lang = state.locale;
   document.title = text("appTitle");
 
+  const resolvedReviewEntries = getResolvedReviewRequestEntries(
+    state.dashboard?.recent_audit_records ?? [],
+  );
   const resolvedAutoEntries = getResolvedAutoDecisionEntries(
     state.dashboard?.recent_audit_records ?? [],
   );
@@ -1291,10 +1706,16 @@ function render(): void {
     resolvedAutoEntries,
     state.selectedDetail,
   );
+  const selectedResolvedReview = getSelectedResolvedReviewRequest(
+    resolvedReviewEntries,
+    state.selectedDetail,
+  );
   const summary = getDashboardSummary(state.dashboard);
-  const detailHtml = selectedResolvedAuto
-    ? renderResolvedAutoDetail(selectedResolvedAuto)
-    : renderRequestDetail(selectedRequest);
+  const detailHtml = selectedResolvedReview
+    ? renderResolvedReviewDetail(selectedResolvedReview)
+    : selectedResolvedAuto
+      ? renderResolvedAutoDetail(selectedResolvedAuto)
+      : renderRequestDetail(selectedRequest);
 
   app.innerHTML = `
     <main
@@ -1430,6 +1851,29 @@ function render(): void {
 
             <section
               class="panel-section"
+              data-testid="resolved-review-results-section"
+            >
+              <div
+                class="panel-header"
+                data-testid="resolved-review-results-header"
+              >
+                <h2>${escapeHtml(text("recentDecisions"))}</h2>
+                <span data-testid="resolved-review-results-count">
+                  ${resolvedReviewEntries.length}
+                </span>
+              </div>
+              <div class="queue-list" data-testid="resolved-review-results-list">
+                ${renderResolvedReviewList(
+                  resolvedReviewEntries,
+                  state.selectedDetail?.kind === "resolved_request"
+                    ? state.selectedDetail.id
+                    : null,
+                )}
+              </div>
+            </section>
+
+            <section
+              class="panel-section"
               data-testid="resolved-auto-results-section"
             >
               <div
@@ -1457,10 +1901,17 @@ function render(): void {
           class="panel detail-panel"
           data-testid="request-detail-panel"
           data-selected-request-id="${escapeHtml(
-            selectedRequest?.id ?? selectedResolvedAuto?.request_id ?? "",
+            selectedRequest?.id ??
+              selectedResolvedReview?.request_id ??
+              selectedResolvedAuto?.request_id ??
+              "",
           )}"
           data-detail-kind="${state.selectedDetail?.kind ?? "empty"}"
-          data-policy-mode="${escapeHtml(selectedRequest?.policy_mode ?? "")}"
+          data-policy-mode="${escapeHtml(
+            selectedRequest?.policy_mode ??
+              selectedResolvedReview?.policy_mode ??
+              "",
+          )}"
         >
           ${detailHtml}
         </section>
@@ -1515,6 +1966,21 @@ function bindEvents(): void {
           ? {
               kind: "pending_request",
               id: element.dataset.selectRequest,
+            }
+          : null;
+        state.noteDraft = "";
+        render();
+      });
+    });
+
+  document
+    .querySelectorAll<HTMLButtonElement>("[data-select-resolved-request]")
+    .forEach((element) => {
+      element.addEventListener("click", () => {
+        state.selectedDetail = element.dataset.selectResolvedRequest
+          ? {
+              kind: "resolved_request",
+              id: element.dataset.selectResolvedRequest,
             }
           : null;
         state.noteDraft = "";
@@ -1582,6 +2048,17 @@ async function loadDashboard(): Promise<void> {
   }
 }
 
+async function registerHandoffListener(): Promise<void> {
+  await listen<HandoffPayload>(HANDOFF_EVENT, (event) => {
+    queueHandoffRequest(event.payload.request_id);
+  });
+
+  const initialHandoffRequestId = await invoke<string | null>(
+    "consume_handoff_request",
+  );
+  queueHandoffRequest(initialHandoffRequestId);
+}
+
 async function decide(
   requestId: string,
   decision: DecisionCommand,
@@ -1624,6 +2101,10 @@ async function decide(
 
 applyLocale(state.locale);
 render();
+void registerHandoffListener().catch((error) => {
+  state.errorMessage = getErrorMessage(error);
+  render();
+});
 void loadDashboard();
 window.setInterval(() => {
   void loadDashboard();

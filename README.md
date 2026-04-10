@@ -2,7 +2,7 @@
 
 # Plankton
 
-Plankton is a local-first approval console for sensitive resource access. The desktop UI is the policy surface and the human approval surface. The CLI is the operator and LLM entrypoint for access attempts and read-only inspection.
+Plankton is a local-first approval console for sensitive resource access. The desktop UI is the policy surface and the human approval surface. The CLI is the operator and LLM entrypoint for listing, searching, and requesting resource access.
 
 Powered by OpenAquarium
 
@@ -42,9 +42,25 @@ Keep the desktop window open. Daily use is centered on the UI.
 - `assisted` asks a provider for a suggestion, then keeps the final human decision in the desktop UI.
 - `auto` lets local guardrails and the provider produce an automatic allow, deny, or escalate outcome, while keeping the result visible in both UI and CLI.
 
-### 5. Use the CLI for access attempts and read-only inspection
+### 5. Use the CLI to list, search, and request access
 
-Create an access attempt with the installed command:
+List the resource identifiers currently available to the local LLM surface:
+
+```bash
+plankton list
+```
+
+This command lists identifiers and minimal metadata only. It does not print secret values.
+
+Search the same identifier view with a fuzzy resource match:
+
+```bash
+plankton search api-token
+```
+
+`search` narrows the same resource identifier surface returned by `list`. It still returns identifiers and minimal metadata only, never secret values.
+
+Request one resource with the installed command:
 
 ```bash
 plankton get secret/api-token \
@@ -52,16 +68,7 @@ plankton get secret/api-token \
   --requested-by alice
 ```
 
-Inspect the same request from the CLI:
-
-```bash
-plankton queue
-plankton status <request-id>
-plankton suggestion <request-id>
-plankton audit --limit 20
-```
-
-`queue` is the current list-style query surface. Human approval does not happen here; it happens in the desktop UI.
+If the request cannot be completed automatically, Plankton hands off to the desktop UI. Human approval, suggestion review, and audit inspection all happen there.
 
 If you are working from a source checkout instead of the cask, run the same commands with `cargo run -p plankton -- ...`.
 
@@ -96,7 +103,7 @@ export PLANKTON_CLAUDE_MODEL=...
 ## Operator Boundaries
 
 - The UI owns strategy configuration and human approval.
-- The CLI is for requesting access and reading state, not for normal human approval.
+- The CLI is for listing, searching, and requesting resource access, not for human approval or audit management.
 - If you still see `approve` or `reject` in the repository, treat them as internal or legacy compatibility paths, not as the primary operator workflow.
 
 ## Further Reading
@@ -110,5 +117,5 @@ export PLANKTON_CLAUDE_MODEL=...
 - Every access attempt becomes an explicit request before any approval or model action happens.
 - Sensitive context is sanitized before a provider sees it.
 - Local guardrails stay authoritative even when a provider is enabled.
-- The same request can be explained from both the desktop UI and the CLI through a shared audit trail.
+- The desktop UI owns the detailed approval and audit trail for every request.
 - The system is designed to fail closed when context is incomplete, a provider response is invalid, or a risk boundary is crossed.
