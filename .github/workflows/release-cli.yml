@@ -137,12 +137,15 @@ jobs:
             dist/plankton-cli.rb
 
       - name: Update Homebrew tap
-        if: ${{ secrets.HOMEBREW_TAP_GITHUB_TOKEN != '' }}
         env:
           HOMEBREW_TAP_GITHUB_TOKEN: ${{ secrets.HOMEBREW_TAP_GITHUB_TOKEN }}
           HOMEBREW_TAP_REPOSITORY: ${{ vars.HOMEBREW_TAP_REPOSITORY }}
           VERSION: ${{ needs.prepare.outputs.version }}
         run: |
+          if [ -z "${HOMEBREW_TAP_GITHUB_TOKEN:-}" ]; then
+            echo "Skipping Homebrew tap publish because HOMEBREW_TAP_GITHUB_TOKEN is not configured"
+            exit 0
+          fi
           tap_repository="${HOMEBREW_TAP_REPOSITORY:-zqqqqz2000/homebrew-tap}"
           formula_name="plankton-cli"
           git clone "https://x-access-token:${HOMEBREW_TAP_GITHUB_TOKEN}@github.com/${tap_repository}.git" tap
