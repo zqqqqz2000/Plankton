@@ -1,6 +1,6 @@
 use std::{collections::BTreeMap, path::Path};
 
-use crate::{RequestContext, SanitizedPromptContext};
+use crate::{CallChainNode, RequestContext, SanitizedPromptContext};
 
 pub const REDACTED_VALUE: &str = "[redacted]";
 const SENSITIVE_MARKERS: [&str; 12] = [
@@ -38,18 +38,14 @@ pub fn sanitize_prompt_context(context: &RequestContext) -> SanitizedPromptConte
     let script_path = context
         .script_path
         .as_ref()
-        .map(|value| sanitize_text("script_path", value, &mut redacted_fields, &mut notes));
+        .map(|value| sanitize_path_text("script_path", value, &mut redacted_fields, &mut notes));
     let call_chain = context
         .call_chain
         .iter()
-        .enumerate()
-        .map(|(index, value)| {
-            sanitize_text(
-                &format!("call_chain[{index}]"),
-                value,
-                &mut redacted_fields,
-                &mut notes,
-            )
+        .filter_map(|node| {
+            node.prompt_display_path().map(|value| {
+                sanitize_path_text("call_chain", value, &mut redacted_fields, &mut notes)
+            })
         })
         .collect::<Vec<_>>();
 
@@ -102,11 +98,37 @@ pub fn sanitize_request_context_for_storage(context: &RequestContext) -> Request
         reason: sanitized.reason,
         requested_by: sanitized.requested_by,
         script_path: sanitized.script_path,
-        call_chain: sanitized.call_chain,
+        call_chain: sanitize_call_chain_for_storage(context),
         env_vars: sanitized.env_vars,
         metadata: sanitized.metadata,
         created_at: context.created_at,
     }
+}
+
+fn sanitize_call_chain_for_storage(context: &RequestContext) -> Vec<CallChainNode> {
+    context
+        .call_chain
+        .iter()
+        .cloned()
+        .map(|mut node| {
+            node.process_name = node
+                .process_name
+                .map(|value| sanitize_path_value_for_storage(&value));
+            node.executable_path = node
+                .executable_path
+                .map(|value| sanitize_path_value_for_storage(&value));
+            node.argv = node
+                .argv
+                .into_iter()
+                .map(|value| sanitize_path_value_for_storage(&value))
+                .collect();
+            node.resolved_file_path = node
+                .resolved_file_path
+                .map(|value| sanitize_path_value_for_storage(&value));
+            node.clear_preview_content();
+            node
+        })
+        .collect()
 }
 
 fn sanitize_metadata(
@@ -151,6 +173,31 @@ fn sanitize_text(
     }
 
     value.trim().to_string()
+}
+
+fn sanitize_path_text(
+    field_name: &str,
+    value: &str,
+    redacted_fields: &mut Vec<String>,
+    notes: &mut Vec<String>,
+) -> String {
+    if looks_sensitive_value(value) && !looks_absolute_path(value) {
+        redacted_fields.push(field_name.to_string());
+        notes.push(format!(
+            "redacted {field_name} because it looked secret-like"
+        ));
+        return REDACTED_VALUE.to_string();
+    }
+
+    value.trim().to_string()
+}
+
+fn sanitize_path_value_for_storage(value: &str) -> String {
+    if looks_sensitive_value(value) && !looks_absolute_path(value) {
+        REDACTED_VALUE.to_string()
+    } else {
+        value.trim().to_string()
+    }
 }
 
 pub(crate) fn looks_absolute_path(value: &str) -> bool {
@@ -230,7 +277,7 @@ pub(crate) fn looks_sensitive_value(value: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use crate::RequestContext;
+    use crate::{CallChainNode, RequestContext};
 
     use super::{sanitize_prompt_context, sanitize_request_context_for_storage};
 
@@ -276,7 +323,7 @@ mod tests {
     }
 
     #[test]
-    fn trims_absolute_paths_from_prompt_and_storage_contexts() {
+    fn preserves_paths_but_strips_preview_content_from_prompt_and_storage_contexts() {
         let mut context = RequestContext::new(
             "secret/demo".to_string(),
             "Need smoke test access".to_string(),
@@ -284,19 +331,32 @@ mod tests {
         );
         context.script_path = Some("/Users/jpx/private/run-secret.sh".to_string());
         context.call_chain = vec![
-            "/Users/jpx/private/run-secret.sh".to_string(),
-            "bash".to_string(),
+            CallChainNode::legacy_path("/Users/jpx/private/run-secret.sh"),
+            CallChainNode::legacy_path("bash"),
         ];
+        context.call_chain[0].preview_text = Some("echo secret".to_string());
+        context.call_chain[0].preview_error = Some("Preview unavailable".to_string());
 
         let prompt_context = sanitize_prompt_context(&context);
         let stored_context = sanitize_request_context_for_storage(&context);
 
-        assert_eq!(prompt_context.script_path.as_deref(), Some("run-secret.sh"));
-        assert_eq!(stored_context.script_path.as_deref(), Some("run-secret.sh"));
-        assert_eq!(prompt_context.call_chain[0], "run-secret.sh");
-        assert_eq!(stored_context.call_chain[0], "run-secret.sh");
-        assert!(prompt_context
-            .redacted_fields
-            .contains(&"script_path".to_string()));
+        assert_eq!(
+            prompt_context.script_path.as_deref(),
+            Some("/Users/jpx/private/run-secret.sh")
+        );
+        assert_eq!(
+            stored_context.script_path.as_deref(),
+            Some("/Users/jpx/private/run-secret.sh")
+        );
+        assert_eq!(
+            prompt_context.call_chain[0],
+            "/Users/jpx/private/run-secret.sh"
+        );
+        assert_eq!(
+            stored_context.call_chain[0].resolved_file_path.as_deref(),
+            Some("/Users/jpx/private/run-secret.sh")
+        );
+        assert_eq!(stored_context.call_chain[0].preview_text, None);
+        assert_eq!(stored_context.call_chain[0].preview_error, None);
     }
 }

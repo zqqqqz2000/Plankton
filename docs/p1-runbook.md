@@ -112,7 +112,6 @@ cargo run -p plankton -- get secret/api-key \
   --reason "Need local smoke test access" \
   --requested-by alice \
   --script-path scripts/smoke.sh \
-  --call-chain scripts/smoke.sh \
   --metadata environment=dev
 ```
 
@@ -120,6 +119,7 @@ Expected result:
 
 - the CLI prints JSON for the request lifecycle
 - the JSON includes a request `id`
+- Plankton automatically captures the runtime call chain during request submission
 - if the request needs review, Plankton hands off to the desktop UI and keeps the request pending until a final decision is recorded
 - when the command returns, the response includes the final `approval_status` and `final_decision`
 

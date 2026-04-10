@@ -2,8 +2,9 @@ use std::sync::Mutex;
 
 use anyhow::{Context, Result};
 use plankton_core::{
-    load_settings, save_user_default_policy_mode, AccessRequest, DashboardData, Decision,
-    PlanktonSettings, PolicyMode,
+    load_settings, preview_call_chain_for_desktop, save_user_default_policy_mode,
+    save_user_settings, AccessRequest, DashboardData, Decision, PlanktonSettings, PolicyMode,
+    UserSettings,
 };
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, Listener, Manager, Runtime, State};
@@ -46,6 +47,20 @@ fn lock_pending_handoff_request<'a>(
         .pending_handoff_request_id
         .lock()
         .map_err(|_| "failed to lock handoff state".to_string())
+}
+
+fn current_user_settings(state: &State<'_, AppState>) -> Result<UserSettings, String> {
+    let settings = lock_settings(state)?;
+    Ok(UserSettings::from(&*settings))
+}
+
+fn reload_runtime_settings(state: &State<'_, AppState>) -> Result<UserSettings, String> {
+    let reloaded = load_settings()
+        .map_err(|error| format!("failed to reload settings after save: {error}"))?;
+    let snapshot = UserSettings::from(&reloaded);
+    let mut settings = lock_settings(state)?;
+    *settings = reloaded;
+    Ok(snapshot)
 }
 
 fn normalize_request_id(value: impl AsRef<str>) -> Option<String> {
@@ -143,11 +158,17 @@ async fn dashboard(state: State<'_, AppState>) -> Result<DashboardData, String> 
         settings.recent_audit_limit
     };
 
-    state
+    let mut data = state
         .store
         .dashboard(recent_audit_limit)
         .await
-        .map_err(|error| error.to_string())
+        .map_err(|error| error.to_string())?;
+
+    for request in &mut data.pending_requests {
+        preview_call_chain_for_desktop(&mut request.context.call_chain);
+    }
+
+    Ok(data)
 }
 
 #[tauri::command]
@@ -159,18 +180,30 @@ async fn desktop_preferences(state: State<'_, AppState>) -> Result<DesktopPrefer
 }
 
 #[tauri::command]
+async fn desktop_settings(state: State<'_, AppState>) -> Result<UserSettings, String> {
+    current_user_settings(&state)
+}
+
+#[tauri::command]
 async fn set_default_policy_mode(
     policy_mode: PolicyMode,
     state: State<'_, AppState>,
 ) -> Result<DesktopPreferences, String> {
     save_user_default_policy_mode(policy_mode).map_err(|error| error.to_string())?;
-
-    let mut settings = lock_settings(&state)?;
-    settings.default_policy_mode = policy_mode;
+    let settings = reload_runtime_settings(&state)?;
 
     Ok(DesktopPreferences {
         default_policy_mode: settings.default_policy_mode,
     })
+}
+
+#[tauri::command]
+async fn save_desktop_settings(
+    settings: UserSettings,
+    state: State<'_, AppState>,
+) -> Result<UserSettings, String> {
+    save_user_settings(&settings).map_err(|error| error.to_string())?;
+    reload_runtime_settings(&state)
 }
 
 #[tauri::command]
@@ -244,7 +277,9 @@ fn run() -> Result<()> {
         .invoke_handler(tauri::generate_handler![
             dashboard,
             desktop_preferences,
+            desktop_settings,
             set_default_policy_mode,
+            save_desktop_settings,
             approve_request,
             reject_request,
             consume_handoff_request

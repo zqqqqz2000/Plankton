@@ -6,9 +6,10 @@ use anyhow::{bail, Context, Result};
 use clap::{ArgGroup, Args, Parser, Subcommand, ValueEnum};
 use desktop_handoff::maybe_trigger_desktop_handoff;
 use plankton_core::{
-    load_settings, AccessRequest, ApprovalStatus, AuditAction, AuditRecord,
-    AutomaticDecisionSource, AutomaticDecisionTrace, AutomaticDisposition, Decision, LlmSuggestion,
-    LlmSuggestionUsage, PolicyMode, ProviderTrace, RequestContext, SuggestedDecision,
+    collect_runtime_call_chain, derive_script_path, load_settings, prompt_call_chain_paths,
+    AccessRequest, ApprovalStatus, AuditAction, AuditRecord, AutomaticDecisionSource,
+    AutomaticDecisionTrace, AutomaticDisposition, Decision, LlmSuggestion, LlmSuggestionUsage,
+    PolicyMode, ProviderTrace, RequestContext, SuggestedDecision,
 };
 use plankton_store::{AccessibleResourceRecord, RequestQueryResult, SqliteStore};
 use serde::Serialize;
@@ -100,14 +101,6 @@ struct GetArgs {
         help = "Requester identity. Defaults to the current OS user when omitted"
     )]
     requested_by: Option<String>,
-    #[arg(long, help = "Originating script path, if any")]
-    script_path: Option<String>,
-    #[arg(
-        long = "call-chain",
-        value_name = "STEP",
-        help = "Repeat to capture each script or process hop from outermost to innermost"
-    )]
-    call_chain: Vec<String>,
     #[arg(
         long = "env",
         value_name = "KEY=VALUE",
@@ -380,12 +373,12 @@ async fn run() -> Result<()> {
                 resource_flag,
                 reason,
                 requested_by,
-                script_path,
-                call_chain,
                 env_vars,
                 metadata,
                 policy_mode,
             } = args;
+            let call_chain =
+                collect_runtime_call_chain().context("failed to collect runtime call chain")?;
             let mut context = RequestContext::new(
                 resource
                     .or(resource_flag)
@@ -393,7 +386,7 @@ async fn run() -> Result<()> {
                 reason,
                 requested_by.unwrap_or_else(default_actor),
             );
-            context.script_path = script_path;
+            context.script_path = derive_script_path(&call_chain);
             context.call_chain = call_chain;
             context.env_vars = parse_key_values("env", env_vars)?;
             context.metadata = parse_key_values("metadata", metadata)?;
@@ -619,7 +612,7 @@ fn build_request_summary_view(request: &AccessRequest) -> RequestSummaryView {
         final_decision: request.final_decision,
         provider_kind: request.provider_kind.clone(),
         script_path: request.context.script_path.clone(),
-        call_chain: request.context.call_chain.clone(),
+        call_chain: prompt_call_chain_paths(&request.context.call_chain),
         env_vars: request.context.env_vars.clone(),
         metadata: request.context.metadata.clone(),
         created_at: request.created_at,
@@ -1194,7 +1187,10 @@ fn render_request_text(request: &AccessRequest) -> String {
         ),
         format!(
             "call_chain: {}",
-            format_list(&request.context.call_chain, " -> ")
+            format_list(
+                &prompt_call_chain_paths(&request.context.call_chain),
+                " -> "
+            )
         ),
         format!("env_vars: {}", format_map(&request.context.env_vars)),
         format!("metadata: {}", format_map(&request.context.metadata)),
@@ -1661,8 +1657,6 @@ mod tests {
             "Need smoke test access",
             "--requested-by",
             "alice",
-            "--call-chain",
-            "scripts/smoke.sh",
             "--metadata",
             "environment=dev",
         ])

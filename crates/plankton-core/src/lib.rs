@@ -1,5 +1,6 @@
 pub mod acp;
 pub mod automatic;
+pub mod call_chain;
 pub mod config;
 pub mod domain;
 pub mod provider;
@@ -15,9 +16,15 @@ pub use automatic::{
     secret_exposure_risk, AutomaticDecisionSource, AutomaticDecisionTrace, AutomaticDisposition,
     AUTO_ALLOW_MAX_RISK_SCORE, AUTO_DENY_MIN_RISK_SCORE,
 };
+pub use call_chain::{
+    collect_runtime_call_chain, derive_script_path, deserialize_call_chain_nodes,
+    preview_call_chain_for_desktop, prompt_call_chain_paths, read_allowlisted_call_chain_file,
+    read_allowlisted_paths_file, CallChainError, CallChainNode, CallChainNodeSource,
+    CallChainPreviewStatus, CallChainReadFileResult,
+};
 pub use config::{
-    load_settings, save_user_default_policy_mode, user_settings_path, PlanktonSettings,
-    SettingsError, SettingsPersistError,
+    load_settings, save_user_default_policy_mode, save_user_settings, user_settings_path,
+    PlanktonSettings, SettingsError, SettingsPersistError, UserSettings,
 };
 pub use domain::{
     AccessRequest, ApprovalStatus, AuditAction, AuditRecord, DashboardData, Decision, DomainError,

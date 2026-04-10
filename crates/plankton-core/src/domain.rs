@@ -5,7 +5,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use uuid::Uuid;
 
-use crate::{AutomaticDecisionTrace, AutomaticDisposition};
+use crate::{
+    deserialize_call_chain_nodes, AutomaticDecisionTrace, AutomaticDisposition, CallChainNode,
+};
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -63,7 +65,8 @@ pub struct RequestContext {
     pub reason: String,
     pub requested_by: String,
     pub script_path: Option<String>,
-    pub call_chain: Vec<String>,
+    #[serde(default, deserialize_with = "deserialize_call_chain_nodes")]
+    pub call_chain: Vec<CallChainNode>,
     pub env_vars: BTreeMap<String, String>,
     pub metadata: BTreeMap<String, String>,
     pub created_at: DateTime<Utc>,
@@ -105,6 +108,8 @@ pub struct ProviderInputSnapshot {
     pub prompt_contract_version: String,
     pub prompt_sha256: String,
     pub prompt: String,
+    #[serde(default)]
+    pub allowed_read_files: Vec<String>,
     pub sanitized_context: SanitizedPromptContext,
 }
 

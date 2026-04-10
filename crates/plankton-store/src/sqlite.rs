@@ -93,7 +93,8 @@ impl SqliteStore {
             PolicyMode::ManualOnly => (None, None, None, None),
             PolicyMode::Assisted => {
                 let (provider_input, llm_suggestion) =
-                    generate_llm_suggestion(settings, policy_mode, &sanitized_context).await?;
+                    generate_llm_suggestion(settings, policy_mode, &context, &sanitized_context)
+                        .await?;
                 (
                     Some(normalized_provider_kind),
                     Some(provider_input),
@@ -109,8 +110,12 @@ impl SqliteStore {
                 {
                     (provider_kind, None, None, Some(local_decision))
                 } else {
-                    let provider_input =
-                        build_provider_input_snapshot(settings, policy_mode, &sanitized_context)?;
+                    let provider_input = build_provider_input_snapshot(
+                        settings,
+                        policy_mode,
+                        &context,
+                        &sanitized_context,
+                    )?;
 
                     if secret_exposure_risk(&sanitized_context) {
                         let automatic_decision = escalate_for_secret_exposure_risk(
@@ -532,8 +537,8 @@ mod tests {
     use tempfile::tempdir;
 
     use plankton_core::{
-        load_settings, ApprovalStatus, AuditAction, AutomaticDisposition, Decision, PolicyMode,
-        RequestContext,
+        load_settings, ApprovalStatus, AuditAction, AutomaticDisposition, CallChainNode, Decision,
+        PolicyMode, RequestContext,
     };
 
     use super::SqliteStore;
@@ -825,8 +830,8 @@ mod tests {
         );
         context.script_path = Some("/Users/jpx/private/run-secret.sh".to_string());
         context.call_chain = vec![
-            "/Users/jpx/private/run-secret.sh".to_string(),
-            "bash".to_string(),
+            CallChainNode::legacy_path("/Users/jpx/private/run-secret.sh"),
+            CallChainNode::legacy_path("bash"),
         ];
         context.env_vars.insert(
             "OPENAI_API_KEY".to_string(),
@@ -858,13 +863,13 @@ mod tests {
         .await
         .expect("request payloads should be queryable");
 
-        assert!(!context_json.contains("/Users/jpx/private/run-secret.sh"));
-        assert!(!provider_input_json.contains("/Users/jpx/private/run-secret.sh"));
+        assert!(context_json.contains("/Users/jpx/private/run-secret.sh"));
+        assert!(provider_input_json.contains("/Users/jpx/private/run-secret.sh"));
         assert!(!context_json.contains("sk-test-super-secret-value"));
         assert!(!context_json.contains("super-secret-session-token"));
         assert!(!context_json.contains("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"));
         assert!(context_json.contains("[redacted]"));
-        assert!(provider_input_json.contains("run-secret.sh"));
+        assert!(!context_json.contains("\"preview_text\":\"echo secret\""));
     }
 
     #[tokio::test]

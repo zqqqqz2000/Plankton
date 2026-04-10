@@ -16,6 +16,7 @@ import {
   type SuggestionSummaryView,
   type SuggestionTraceView,
 } from "./dashboardModel";
+import { getPreviewHighlightResult } from "./codePreview";
 import { formatElapsed, formatShortId, formatTimestamp } from "./formatters";
 import {
   normalizeHandoffRequestId,
@@ -35,7 +36,9 @@ import type {
   AccessRequest,
   AutomaticDecisionTrace,
   AuditRecord,
+  CallChainEntry,
   DashboardData,
+  DesktopSettings,
   DecisionCommand,
   LlmSuggestion,
   ProviderTrace,
@@ -48,6 +51,9 @@ type BadgeTone = "pending" | "approved" | "rejected" | "neutral";
 type HandoffPayload = {
   request_id: string;
 };
+type PolicyModeValue = "manual_only" | "assisted" | "llm_automatic";
+type ProviderKindValue = "openai_compatible" | "claude" | "acp_codex" | "mock";
+type SettingsFieldKey = keyof DesktopSettings;
 type DetailSelection =
   | {
       kind: "pending_request";
@@ -65,27 +71,41 @@ type DetailSelection =
 
 const state: {
   dashboard: DashboardData | null;
+  settings: DesktopSettings | null;
+  settingsDraft: DesktopSettings | null;
   locale: Locale;
   pendingHandoffRequestId: string | null;
   selectedDetail: DetailSelection;
   noteDraft: string;
   errorMessage: string | null;
+  settingsErrorMessage: string | null;
+  settingsNoticeMessage: string | null;
   lastUpdatedAt: string | null;
   isLoading: boolean;
   isRefreshing: boolean;
   isSubmitting: boolean;
+  isSettingsOpen: boolean;
+  isSettingsLoading: boolean;
+  isSettingsSaving: boolean;
   pendingDecision: DecisionCommand | null;
 } = {
   dashboard: null,
+  settings: null,
+  settingsDraft: null,
   locale: getInitialLocale(),
   pendingHandoffRequestId: null,
   selectedDetail: null,
   noteDraft: "",
   errorMessage: null,
+  settingsErrorMessage: null,
+  settingsNoticeMessage: null,
   lastUpdatedAt: null,
   isLoading: true,
   isRefreshing: false,
   isSubmitting: false,
+  isSettingsOpen: false,
+  isSettingsLoading: false,
+  isSettingsSaving: false,
   pendingDecision: null,
 };
 
@@ -162,6 +182,142 @@ function timestampLabel(
 
 function elapsedLabel(value: string | null): string {
   return formatElapsed(value, Date.now(), state.locale);
+}
+
+function cloneSettings(
+  settings: DesktopSettings | null,
+): DesktopSettings | null {
+  return settings ? { ...settings } : null;
+}
+
+function getPolicyModeOptions(): Array<{
+  value: PolicyModeValue;
+  title: string;
+  description: string;
+}> {
+  return [
+    {
+      value: "manual_only",
+      title: label("manual_only"),
+      description: text("policyHumanReviewDesc"),
+    },
+    {
+      value: "assisted",
+      title: label("assisted"),
+      description: text("policyAssistDesc"),
+    },
+    {
+      value: "llm_automatic",
+      title: label("auto"),
+      description: text("policyAutomaticDesc"),
+    },
+  ];
+}
+
+function getProviderKindOptions(): Array<{
+  value: ProviderKindValue;
+  title: string;
+  description: string;
+}> {
+  return [
+    {
+      value: "openai_compatible",
+      title: label("openai_compatible"),
+      description: text("providerOpenAiDesc"),
+    },
+    {
+      value: "claude",
+      title: label("claude"),
+      description: text("providerClaudeDesc"),
+    },
+    {
+      value: "acp_codex",
+      title: label("acp_codex"),
+      description: text("providerAcpDesc"),
+    },
+    {
+      value: "mock",
+      title: label("mock"),
+      description: text("providerMockDesc"),
+    },
+  ];
+}
+
+function areSettingsEqual(
+  left: DesktopSettings | null,
+  right: DesktopSettings | null,
+): boolean {
+  if (!left || !right) {
+    return left === right;
+  }
+
+  return (
+    left.default_policy_mode === right.default_policy_mode &&
+    left.provider_kind === right.provider_kind &&
+    left.openai_api_base === right.openai_api_base &&
+    left.openai_api_key === right.openai_api_key &&
+    left.openai_model === right.openai_model &&
+    left.openai_temperature === right.openai_temperature &&
+    left.claude_api_base === right.claude_api_base &&
+    left.claude_api_key === right.claude_api_key &&
+    left.claude_model === right.claude_model &&
+    left.claude_anthropic_version === right.claude_anthropic_version &&
+    left.claude_max_tokens === right.claude_max_tokens &&
+    left.claude_temperature === right.claude_temperature &&
+    left.claude_timeout_secs === right.claude_timeout_secs &&
+    left.acp_codex_program === right.acp_codex_program &&
+    left.acp_codex_args === right.acp_codex_args &&
+    left.acp_timeout_secs === right.acp_timeout_secs
+  );
+}
+
+function getSettingsFieldLabel(field: SettingsFieldKey): string {
+  const labelMap: Record<SettingsFieldKey, TranslationKey> = {
+    default_policy_mode: "settingsCurrentPolicy",
+    provider_kind: "provider",
+    openai_api_base: "openAiBase",
+    openai_api_key: "openAiApiKey",
+    openai_model: "openAiModel",
+    openai_temperature: "openAiTemperature",
+    claude_api_base: "claudeBase",
+    claude_api_key: "claudeApiKey",
+    claude_model: "claudeModel",
+    claude_anthropic_version: "claudeApiVersion",
+    claude_max_tokens: "claudeMaxTokens",
+    claude_temperature: "claudeTemperature",
+    claude_timeout_secs: "claudeTimeout",
+    acp_codex_program: "acpProgram",
+    acp_codex_args: "acpArgs",
+    acp_timeout_secs: "acpTimeout",
+  };
+
+  return text(labelMap[field]);
+}
+
+function getOverriddenSettingsFields(
+  submitted: DesktopSettings,
+  effective: DesktopSettings,
+): SettingsFieldKey[] {
+  const fields: SettingsFieldKey[] = [
+    "default_policy_mode",
+    "provider_kind",
+    "openai_api_base",
+    "openai_api_key",
+    "openai_model",
+    "openai_temperature",
+    "claude_api_base",
+    "claude_api_key",
+    "claude_model",
+    "claude_anthropic_version",
+    "claude_max_tokens",
+    "claude_temperature",
+    "claude_timeout_secs",
+    "acp_codex_program",
+    "acp_codex_args",
+    "acp_timeout_secs",
+  ];
+
+  return fields.filter((field) => submitted[field] !== effective[field]);
 }
 
 function applyLocale(locale: Locale): void {
@@ -340,23 +496,134 @@ function renderKeyValueList(
   `;
 }
 
-function renderCallChain(callChain: string[]): string {
+function normalizeCallChainEntry(entry: CallChainEntry): {
+  path: string;
+  processName: string | null;
+  executablePath: string | null;
+  pid: number | null;
+  ppid: number | null;
+  argv: string[];
+  source: string | null;
+  previewable: boolean;
+  previewStatus: string | null;
+  previewText: string | null;
+  previewError: string | null;
+} {
+  if (typeof entry === "string") {
+    return {
+      path: entry,
+      processName: null,
+      executablePath: null,
+      pid: null,
+      ppid: null,
+      argv: [],
+      source: "best_effort",
+      previewable: false,
+      previewStatus: "path_only",
+      previewText: null,
+      previewError: null,
+    };
+  }
+
+  return {
+    path:
+      entry.resolved_file_path ??
+      entry.path ??
+      entry.executable_path ??
+      entry.process_name ??
+      text("unknown"),
+    processName: entry.process_name ?? null,
+    executablePath: entry.executable_path ?? null,
+    pid: typeof entry.pid === "number" ? entry.pid : null,
+    ppid: typeof entry.ppid === "number" ? entry.ppid : null,
+    argv: Array.isArray(entry.argv)
+      ? entry.argv.filter((value): value is string => typeof value === "string")
+      : [],
+    source: entry.source ?? null,
+    previewable: entry.previewable === true || Boolean(entry.preview_text),
+    previewStatus:
+      entry.preview_status ??
+      (entry.preview_text ? "preview_ready" : null) ??
+      (entry.previewable === false ? "not_previewable" : null),
+    previewText: entry.preview_text ?? null,
+    previewError: entry.preview_error ?? null,
+  };
+}
+
+function renderCallChain(callChain: CallChainEntry[]): string {
   if (callChain.length === 0) {
-    return "";
+    return `<p class="empty" data-testid="call-chain-empty">${escapeHtml(
+      text("noCallChain"),
+    )}</p>`;
   }
 
   return `
-    <ul class="compact-list" data-testid="call-chain-list">
+    <div class="call-chain-list" data-testid="call-chain-list">
       ${callChain
-        .map(
-          (step, index) => `
-            <li data-testid="call-chain-step" data-step-index="${index}">
-              ${escapeHtml(step)}
-            </li>
-          `,
-        )
+        .map((step, index) => {
+          const entry = normalizeCallChainEntry(step);
+          const previewResult = entry.previewText
+            ? getPreviewHighlightResult(entry.path, entry.previewText)
+            : null;
+          const processMeta = entry.processName
+            ? `${text("process")}: ${entry.processName}${entry.pid === null ? "" : ` (${entry.pid})`}${entry.ppid === null ? "" : ` → ${entry.ppid}`}`
+            : null;
+          const metaItems = [
+            processMeta,
+            entry.executablePath
+              ? `${text("executable")}: ${entry.executablePath}`
+              : null,
+            entry.argv.length > 0
+              ? `${text("arguments")}: ${entry.argv.join(" ")}`
+              : null,
+            entry.source ? `${text("source")}: ${label(entry.source)}` : null,
+            entry.previewStatus
+              ? `${text("previewStatus")}: ${label(entry.previewStatus)}`
+              : null,
+          ].filter((value): value is string => Boolean(value));
+          return `
+            <article class="call-chain-entry" data-testid="call-chain-step" data-step-index="${index}">
+              <div class="call-chain-path" data-testid="call-chain-path">${escapeHtml(entry.path)}</div>
+              ${
+                metaItems.length > 0
+                  ? `<div class="call-chain-meta" data-testid="call-chain-step-meta">${metaItems
+                      .map(
+                        (item, metaIndex) => `
+                          <span data-testid="call-chain-meta-item" data-meta-index="${metaIndex}">
+                            ${escapeHtml(item)}
+                          </span>
+                        `,
+                      )
+                      .join("")}</div>`
+                  : ""
+              }
+              ${
+                previewResult
+                  ? `
+                    <div class="call-chain-preview-header" data-testid="call-chain-preview-header">
+                      <span class="context-label">${escapeHtml(text("callChainPreview"))}</span>
+                      <span class="call-chain-preview-mode" data-testid="call-chain-preview-mode">
+                        ${escapeHtml(
+                          previewResult.highlighted
+                            ? previewResult.label
+                            : text("plainText"),
+                        )}
+                      </span>
+                    </div>
+                    <pre class="payload-block payload-block-compact payload-code-block" data-testid="call-chain-preview"><code class="payload-code${previewResult.highlighted ? " hljs" : ""}" data-highlighted="${previewResult.highlighted ? "true" : "false"}">${previewResult.html}</code></pre>
+                  `
+                  : `<p class="empty compact-empty" data-testid="call-chain-preview-empty">${escapeHtml(
+                      entry.previewError ??
+                        (entry.previewable
+                          ? text("previewUnavailable")
+                          : label(entry.previewStatus ?? "not_previewable")),
+                    )}</p>`
+              }
+            </article>
+          `;
+        })
         .join("")}
-    </ul>
+    </div>
   `;
 }
 
@@ -443,15 +710,12 @@ function renderContextBlock(request: AccessRequest): string {
     `);
   }
 
-  const callChain = renderCallChain(request.context.call_chain);
-  if (callChain) {
-    groups.push(`
-      <div class="context-group" data-testid="call-chain-card">
-        <span class="context-label">${escapeHtml(text("callChain"))}</span>
-        ${callChain}
-      </div>
-    `);
-  }
+  groups.push(`
+    <div class="context-group" data-testid="call-chain-card">
+      <span class="context-label">${escapeHtml(text("callChain"))}</span>
+      ${renderCallChain(request.context.call_chain)}
+    </div>
+  `);
 
   const environment = renderKeyValueList(
     request.context.env_vars,
@@ -504,32 +768,6 @@ function renderContextBlock(request: AccessRequest): string {
         <h3>${escapeHtml(text("context"))}</h3>
       </div>
       <div class="context-stack">${groups.join("")}</div>
-    </section>
-  `;
-}
-
-function renderPromptBlock(request: AccessRequest): string {
-  if (!request.rendered_prompt.trim()) {
-    return "";
-  }
-
-  return `
-    <section
-      class="detail-section detail-section-wide detail-section-low"
-      data-testid="rendered-prompt-card"
-    >
-      <div
-        class="detail-section-header"
-        data-testid="rendered-prompt-card-header"
-      >
-        <h3>${escapeHtml(text("prompt"))}</h3>
-        <span data-testid="rendered-prompt-request-id">
-          ${escapeHtml(formatShortId(request.id))}
-        </span>
-      </div>
-      <pre class="payload-block" data-testid="rendered-prompt-content">${escapeHtml(
-        request.rendered_prompt,
-      )}</pre>
     </section>
   `;
 }
@@ -1234,15 +1472,19 @@ function renderRequestDetail(selectedRequest: AccessRequest | null): string {
           value: selectedRequest.approval_status,
           kind: "approval_status",
         })}
-        ${renderBadge(
-          decisionLabel(selectedRequest.final_decision),
-          getDecisionTone(selectedRequest.final_decision),
-          {
-            testId: "request-final-decision",
-            value: selectedRequest.final_decision,
-            kind: "final_decision",
-          },
-        )}
+        ${
+          selectedRequest.final_decision
+            ? renderBadge(
+                decisionLabel(selectedRequest.final_decision),
+                getDecisionTone(selectedRequest.final_decision),
+                {
+                  testId: "request-final-decision",
+                  value: selectedRequest.final_decision,
+                  kind: "final_decision",
+                },
+              )
+            : ""
+        }
       </div>
     </div>
 
@@ -1367,8 +1609,6 @@ function renderRequestDetail(selectedRequest: AccessRequest | null): string {
           "request-audit-list",
         )}
       </section>
-
-      ${renderPromptBlock(selectedRequest)}
     </div>
   `;
 }
@@ -1686,6 +1926,393 @@ function renderResolvedReviewDetail(
   `;
 }
 
+function renderSettingsInput(options: {
+  field: SettingsFieldKey;
+  labelText: string;
+  value: string;
+  type: "number" | "password" | "text";
+  autoComplete?: string;
+  min?: string;
+  step?: string;
+}): string {
+  return `
+    <label class="settings-field" data-testid="settings-field-${options.field}">
+      <span class="field-label">${escapeHtml(options.labelText)}</span>
+      <input
+        class="settings-input"
+        data-settings-field="${options.field}"
+        type="${options.type}"
+        value="${escapeHtml(options.value)}"
+        ${options.autoComplete ? `autocomplete="${options.autoComplete}"` : ""}
+        ${options.min ? `min="${options.min}"` : ""}
+        ${options.step ? `step="${options.step}"` : ""}
+        ${state.isSettingsLoading || state.isSettingsSaving ? "disabled" : ""}
+      />
+    </label>
+  `;
+}
+
+function renderSettingsTextarea(options: {
+  field: SettingsFieldKey;
+  labelText: string;
+  value: string;
+}): string {
+  return `
+    <label class="settings-field settings-field-wide" data-testid="settings-field-${options.field}">
+      <span class="field-label">${escapeHtml(options.labelText)}</span>
+      <textarea
+        class="settings-input note-field"
+        data-settings-field="${options.field}"
+        rows="3"
+        ${state.isSettingsLoading || state.isSettingsSaving ? "disabled" : ""}
+      >${escapeHtml(options.value)}</textarea>
+    </label>
+  `;
+}
+
+function renderSettingsModal(): string {
+  if (!state.isSettingsOpen) {
+    return "";
+  }
+
+  const currentPolicyMode =
+    state.settingsDraft?.default_policy_mode ??
+    state.settings?.default_policy_mode ??
+    "manual_only";
+  const currentProviderKind =
+    state.settingsDraft?.provider_kind ??
+    state.settings?.provider_kind ??
+    "mock";
+  const canSaveSettings =
+    state.settings !== null &&
+    state.settingsDraft !== null &&
+    !areSettingsEqual(state.settingsDraft, state.settings) &&
+    !state.isSettingsLoading &&
+    !state.isSettingsSaving;
+
+  return `
+    <div
+      class="modal-backdrop"
+      data-testid="settings-modal-backdrop"
+      role="presentation"
+    >
+      <section
+        class="modal-panel"
+        data-testid="settings-modal"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="settingsModalTitle"
+      >
+        <div class="modal-header" data-testid="settings-modal-header">
+          <div class="modal-title-group">
+            <h2 id="settingsModalTitle">${escapeHtml(text("settingsTitle"))}</h2>
+            <div class="settings-pill-row">
+              <span class="toolbar-count" data-testid="settings-current-policy">
+                ${escapeHtml(
+                  `${text("settingsCurrentPolicy")}: ${label(currentPolicyMode)}`,
+                )}
+              </span>
+              <span class="toolbar-count" data-testid="settings-current-provider">
+                ${escapeHtml(
+                  `${text("settingsCurrentProvider")}: ${label(currentProviderKind)}`,
+                )}
+              </span>
+            </div>
+          </div>
+          <button
+            id="closeSettingsButton"
+            class="ghost"
+            data-testid="close-settings-button"
+            type="button"
+            ${state.isSettingsSaving ? "disabled" : ""}
+          >
+            ${escapeHtml(text("close"))}
+          </button>
+        </div>
+
+        ${
+          state.settingsErrorMessage
+            ? `
+              <section
+                class="alert"
+                role="alert"
+                data-testid="settings-error-banner"
+              >
+                <p data-testid="settings-error-message">${escapeHtml(
+                  state.settingsErrorMessage,
+                )}</p>
+              </section>
+            `
+            : ""
+        }
+
+        ${
+          state.settingsNoticeMessage
+            ? `
+              <section
+                class="alert"
+                role="status"
+                data-testid="settings-notice-banner"
+              >
+                <p data-testid="settings-notice-message">${escapeHtml(
+                  state.settingsNoticeMessage,
+                )}</p>
+              </section>
+            `
+            : ""
+        }
+
+        <div class="modal-grid" data-testid="settings-modal-grid">
+          <section class="detail-section" data-testid="settings-policy-section">
+            <div class="detail-section-header">
+              <h3>${escapeHtml(text("settingsPolicyTitle"))}</h3>
+              <span data-testid="settings-policy-status">
+                ${escapeHtml(
+                  state.isSettingsSaving
+                    ? text("saving")
+                    : state.isSettingsLoading
+                      ? text("syncRefreshing")
+                      : text("settingsSavedPolicy"),
+                )}
+              </span>
+            </div>
+            <p class="section-copy" data-testid="settings-policy-help">
+              ${escapeHtml(text("settingsPolicyHelp"))}
+            </p>
+            <div class="settings-option-list" data-testid="settings-policy-options">
+              ${getPolicyModeOptions()
+                .map(
+                  (option) => `
+                    <label
+                      class="settings-option ${
+                        currentPolicyMode === option.value ? "active" : ""
+                      }"
+                      data-testid="settings-policy-option"
+                      data-policy-mode="${option.value}"
+                    >
+                      <input
+                        type="radio"
+                        name="defaultPolicyMode"
+                        value="${option.value}"
+                        ${currentPolicyMode === option.value ? "checked" : ""}
+                        ${state.isSettingsLoading || state.isSettingsSaving ? "disabled" : ""}
+                      />
+                      <div class="settings-option-copy">
+                        <strong>${escapeHtml(option.title)}</strong>
+                        <p>${escapeHtml(option.description)}</p>
+                      </div>
+                    </label>
+                  `,
+                )
+                .join("")}
+            </div>
+          </section>
+
+          <section class="detail-section" data-testid="settings-provider-section">
+            <div class="detail-section-header">
+              <h3>${escapeHtml(text("settingsProviderTitle"))}</h3>
+              <span data-testid="settings-provider-status">
+                ${escapeHtml(label(currentProviderKind))}
+              </span>
+            </div>
+            <p class="section-copy" data-testid="settings-provider-help">
+              ${escapeHtml(text("settingsProviderHelp"))}
+            </p>
+            <div class="settings-option-list" data-testid="settings-provider-options">
+              ${getProviderKindOptions()
+                .map(
+                  (option) => `
+                    <label
+                      class="settings-option ${
+                        currentProviderKind === option.value ? "active" : ""
+                      }"
+                      data-testid="settings-provider-option"
+                      data-provider-kind="${option.value}"
+                    >
+                      <input
+                        type="radio"
+                        name="providerKind"
+                        value="${option.value}"
+                        ${currentProviderKind === option.value ? "checked" : ""}
+                        ${state.isSettingsLoading || state.isSettingsSaving ? "disabled" : ""}
+                      />
+                      <div class="settings-option-copy">
+                        <strong>${escapeHtml(option.title)}</strong>
+                        <p>${escapeHtml(option.description)}</p>
+                      </div>
+                    </label>
+                  `,
+                )
+                .join("")}
+            </div>
+          </section>
+
+          <section class="detail-section" data-testid="settings-openai-section">
+            <div class="detail-section-header">
+              <h3>${escapeHtml(text("settingsOpenAiTitle"))}</h3>
+              <span>${escapeHtml(label("openai_compatible"))}</span>
+            </div>
+            <p class="section-copy">${escapeHtml(text("providerOpenAiDesc"))}</p>
+            <div class="settings-form-grid">
+              ${renderSettingsInput({
+                field: "openai_api_base",
+                labelText: text("openAiBase"),
+                value: state.settingsDraft?.openai_api_base ?? "",
+                type: "text",
+                autoComplete: "url",
+              })}
+              ${renderSettingsInput({
+                field: "openai_api_key",
+                labelText: text("openAiApiKey"),
+                value: state.settingsDraft?.openai_api_key ?? "",
+                type: "password",
+                autoComplete: "off",
+              })}
+              ${renderSettingsInput({
+                field: "openai_model",
+                labelText: text("openAiModel"),
+                value: state.settingsDraft?.openai_model ?? "",
+                type: "text",
+                autoComplete: "off",
+              })}
+              ${renderSettingsInput({
+                field: "openai_temperature",
+                labelText: text("openAiTemperature"),
+                value: String(state.settingsDraft?.openai_temperature ?? 0),
+                type: "number",
+                step: "0.1",
+                min: "0",
+              })}
+            </div>
+          </section>
+
+          <section class="detail-section" data-testid="settings-claude-section">
+            <div class="detail-section-header">
+              <h3>${escapeHtml(text("settingsClaudeTitle"))}</h3>
+              <span>${escapeHtml(label("claude"))}</span>
+            </div>
+            <p class="section-copy">${escapeHtml(text("providerClaudeDesc"))}</p>
+            <div class="settings-form-grid">
+              ${renderSettingsInput({
+                field: "claude_api_base",
+                labelText: text("claudeBase"),
+                value: state.settingsDraft?.claude_api_base ?? "",
+                type: "text",
+                autoComplete: "url",
+              })}
+              ${renderSettingsInput({
+                field: "claude_api_key",
+                labelText: text("claudeApiKey"),
+                value: state.settingsDraft?.claude_api_key ?? "",
+                type: "password",
+                autoComplete: "off",
+              })}
+              ${renderSettingsInput({
+                field: "claude_model",
+                labelText: text("claudeModel"),
+                value: state.settingsDraft?.claude_model ?? "",
+                type: "text",
+                autoComplete: "off",
+              })}
+              ${renderSettingsInput({
+                field: "claude_anthropic_version",
+                labelText: text("claudeApiVersion"),
+                value: state.settingsDraft?.claude_anthropic_version ?? "",
+                type: "text",
+                autoComplete: "off",
+              })}
+              ${renderSettingsInput({
+                field: "claude_max_tokens",
+                labelText: text("claudeMaxTokens"),
+                value: String(state.settingsDraft?.claude_max_tokens ?? 1),
+                type: "number",
+                step: "1",
+                min: "1",
+              })}
+              ${renderSettingsInput({
+                field: "claude_temperature",
+                labelText: text("claudeTemperature"),
+                value: String(state.settingsDraft?.claude_temperature ?? 0),
+                type: "number",
+                step: "0.1",
+                min: "0",
+              })}
+              ${renderSettingsInput({
+                field: "claude_timeout_secs",
+                labelText: text("claudeTimeout"),
+                value: String(state.settingsDraft?.claude_timeout_secs ?? 1),
+                type: "number",
+                step: "1",
+                min: "1",
+              })}
+            </div>
+          </section>
+
+          <section class="detail-section" data-testid="settings-acp-section">
+            <div class="detail-section-header">
+              <h3>${escapeHtml(text("settingsAcpTitle"))}</h3>
+              <span>${escapeHtml(label("acp_codex"))}</span>
+            </div>
+            <p class="section-copy">${escapeHtml(text("providerAcpDesc"))}</p>
+            <div class="settings-form-grid">
+              ${renderSettingsInput({
+                field: "acp_codex_program",
+                labelText: text("acpProgram"),
+                value: state.settingsDraft?.acp_codex_program ?? "",
+                type: "text",
+                autoComplete: "off",
+              })}
+              ${renderSettingsTextarea({
+                field: "acp_codex_args",
+                labelText: text("acpArgs"),
+                value: state.settingsDraft?.acp_codex_args ?? "",
+              })}
+              ${renderSettingsInput({
+                field: "acp_timeout_secs",
+                labelText: text("acpTimeout"),
+                value: String(state.settingsDraft?.acp_timeout_secs ?? 1),
+                type: "number",
+                step: "1",
+                min: "1",
+              })}
+            </div>
+          </section>
+
+          <section
+            class="detail-section detail-section-low"
+            data-testid="settings-llm-section"
+          >
+            <div class="detail-section-header">
+              <h3>${escapeHtml(text("settingsLlmTitle"))}</h3>
+              <span>${escapeHtml(text("settingsSavedSuccess"))}</span>
+            </div>
+            <p class="section-copy" data-testid="settings-llm-help">
+              ${escapeHtml(text("settingsLlmHelp"))}
+            </p>
+            <div class="settings-placeholder" data-testid="settings-env-override-help">
+              <p>${escapeHtml(text("settingsEnvOverrideHelp"))}</p>
+            </div>
+          </section>
+        </div>
+
+        <div class="modal-actions" data-testid="settings-modal-actions">
+          <button
+            id="saveSettingsButton"
+            class="primary"
+            data-testid="save-settings-button"
+            type="button"
+            ${canSaveSettings ? "" : "disabled"}
+          >
+            ${escapeHtml(
+              state.isSettingsSaving ? text("saving") : text("save"),
+            )}
+          </button>
+        </div>
+      </section>
+    </div>
+  `;
+}
+
 function render(): void {
   document.documentElement.lang = state.locale;
   document.title = text("appTitle");
@@ -1740,6 +2367,15 @@ function render(): void {
           </span>
         </div>
         <div class="toolbar-actions">
+          <button
+            id="openSettingsButton"
+            class="ghost"
+            data-testid="open-settings-button"
+            type="button"
+            ${state.isSettingsSaving ? "disabled" : ""}
+          >
+            ${escapeHtml(text("settings"))}
+          </button>
           <div
             class="locale-switch"
             data-testid="locale-switcher"
@@ -1928,6 +2564,7 @@ function render(): void {
           "global-audit-list",
         )}
       </section>
+      ${renderSettingsModal()}
     </main>
   `;
 
@@ -1935,6 +2572,16 @@ function render(): void {
 }
 
 function bindEvents(): void {
+  window.onkeydown = (event: KeyboardEvent) => {
+    if (
+      event.key === "Escape" &&
+      state.isSettingsOpen &&
+      !state.isSettingsSaving
+    ) {
+      closeSettings();
+    }
+  };
+
   document
     .querySelectorAll<HTMLButtonElement>("[data-locale]")
     .forEach((element) => {
@@ -1947,6 +2594,75 @@ function bindEvents(): void {
         applyLocale(locale);
         render();
       });
+    });
+
+  document
+    .querySelector("#openSettingsButton")
+    ?.addEventListener("click", () => {
+      openSettings();
+    });
+
+  document
+    .querySelector("#closeSettingsButton")
+    ?.addEventListener("click", () => {
+      closeSettings();
+    });
+
+  document
+    .querySelectorAll<HTMLInputElement>('input[name="defaultPolicyMode"]')
+    .forEach((element) => {
+      element.addEventListener("change", () => {
+        if (!state.settingsDraft) {
+          return;
+        }
+
+        state.settingsDraft = {
+          ...state.settingsDraft,
+          default_policy_mode: element.value,
+        };
+        render();
+      });
+    });
+
+  document
+    .querySelectorAll<HTMLInputElement>('input[name="providerKind"]')
+    .forEach((element) => {
+      element.addEventListener("change", () => {
+        if (!state.settingsDraft) {
+          return;
+        }
+
+        state.settingsDraft = {
+          ...state.settingsDraft,
+          provider_kind: element.value,
+        };
+        render();
+      });
+    });
+
+  document
+    .querySelectorAll<
+      HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement
+    >("[data-settings-field]")
+    .forEach((element) => {
+      element.addEventListener("input", () => {
+        updateSettingsDraftField(
+          element.dataset.settingsField as SettingsFieldKey | undefined,
+          element,
+        );
+      });
+      element.addEventListener("change", () => {
+        updateSettingsDraftField(
+          element.dataset.settingsField as SettingsFieldKey | undefined,
+          element,
+        );
+      });
+    });
+
+  document
+    .querySelector("#saveSettingsButton")
+    ?.addEventListener("click", () => {
+      void saveSettings();
     });
 
   document.querySelector("#refreshButton")?.addEventListener("click", () => {
@@ -2028,11 +2744,126 @@ function bindEvents(): void {
     });
 }
 
-async function loadDashboard(): Promise<void> {
+function openSettings(): void {
+  state.isSettingsOpen = true;
+  state.settingsErrorMessage = null;
+  state.settingsNoticeMessage = null;
+
+  state.settingsDraft = cloneSettings(state.settings);
+
+  render();
+
+  if (!state.isSettingsLoading) {
+    void loadDesktopSettings();
+  }
+}
+
+function closeSettings(): void {
+  if (state.isSettingsSaving) {
+    return;
+  }
+
+  state.isSettingsOpen = false;
+  state.settingsErrorMessage = null;
+  state.settingsNoticeMessage = null;
+  state.settingsDraft = cloneSettings(state.settings);
+  render();
+}
+
+function updateSettingsDraftField(
+  field: SettingsFieldKey | undefined,
+  element: HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement,
+): void {
+  if (!field || !state.settingsDraft) {
+    return;
+  }
+
+  const numericFields = new Set<SettingsFieldKey>([
+    "openai_temperature",
+    "claude_max_tokens",
+    "claude_temperature",
+    "claude_timeout_secs",
+    "acp_timeout_secs",
+  ]);
+  const rawValue = element.value;
+  const parsedValue = numericFields.has(field) ? Number(rawValue) : rawValue;
+
+  if (typeof parsedValue === "number" && Number.isNaN(parsedValue)) {
+    return;
+  }
+
+  state.settingsDraft = {
+    ...state.settingsDraft,
+    [field]: parsedValue,
+  } as DesktopSettings;
+}
+
+async function loadDesktopSettings(): Promise<void> {
+  state.isSettingsLoading = true;
+  state.settingsErrorMessage = null;
+  state.settingsNoticeMessage = null;
+  if (state.isSettingsOpen) {
+    render();
+  }
+
+  try {
+    const settings = await invoke<DesktopSettings>("desktop_settings");
+    state.settings = settings;
+    state.settingsDraft = cloneSettings(settings);
+  } catch (error) {
+    state.settingsErrorMessage = getErrorMessage(error);
+  } finally {
+    state.isSettingsLoading = false;
+    if (state.isSettingsOpen) {
+      render();
+    }
+  }
+}
+
+async function saveSettings(): Promise<void> {
+  if (
+    !state.settingsDraft ||
+    state.isSettingsLoading ||
+    state.isSettingsSaving
+  ) {
+    return;
+  }
+
+  const submitted = { ...state.settingsDraft };
+  state.isSettingsSaving = true;
+  state.settingsErrorMessage = null;
+  state.settingsNoticeMessage = null;
+  render();
+
+  try {
+    const settings = await invoke<DesktopSettings>("save_desktop_settings", {
+      settings: submitted,
+    });
+    state.settings = settings;
+    state.settingsDraft = cloneSettings(settings);
+    const overriddenFields = getOverriddenSettingsFields(submitted, settings);
+    state.settingsNoticeMessage =
+      overriddenFields.length > 0
+        ? text("settingsEnvOverrideDetected", {
+            fields: overriddenFields.map(getSettingsFieldLabel).join(", "),
+          })
+        : text("settingsSavedSuccess");
+  } catch (error) {
+    state.settingsErrorMessage = getErrorMessage(error);
+  } finally {
+    state.isSettingsSaving = false;
+    render();
+  }
+}
+
+async function loadDashboard(options?: { silent?: boolean }): Promise<void> {
+  const silent = options?.silent ?? false;
   state.isLoading = state.dashboard === null;
   state.isRefreshing = true;
   state.errorMessage = null;
-  render();
+  if (state.isLoading || !silent) {
+    render();
+  }
 
   try {
     const dashboard = await invoke<DashboardData>("dashboard");
@@ -2063,21 +2894,6 @@ async function decide(
   requestId: string,
   decision: DecisionCommand,
 ): Promise<void> {
-  const selectedRequest = getSelectedRequest(state.dashboard, requestId);
-  const action =
-    decision === "approve_request" ? text("approve") : text("reject");
-
-  if (
-    !window.confirm(
-      text("confirmDecision", {
-        action,
-        resource: selectedRequest?.context.resource ?? requestId,
-      }),
-    )
-  ) {
-    return;
-  }
-
   state.isSubmitting = true;
   state.pendingDecision = decision;
   state.errorMessage = null;
@@ -2105,7 +2921,8 @@ void registerHandoffListener().catch((error) => {
   state.errorMessage = getErrorMessage(error);
   render();
 });
+void loadDesktopSettings();
 void loadDashboard();
 window.setInterval(() => {
-  void loadDashboard();
+  void loadDashboard({ silent: true });
 }, AUTO_REFRESH_MS);

@@ -23,13 +23,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut settings = load_settings()?;
     settings.provider_kind = CLAUDE_PROVIDER_KIND.to_string();
 
-    let context = sanitize_prompt_context(&RequestContext::new(
-        args.resource,
-        args.reason,
-        args.requested_by,
-    ));
+    let raw_context = RequestContext::new(args.resource, args.reason, args.requested_by);
+    let context = sanitize_prompt_context(&raw_context);
     let (_, suggestion) =
-        generate_llm_suggestion(&settings, PolicyMode::Assisted, &context).await?;
+        generate_llm_suggestion(&settings, PolicyMode::Assisted, &raw_context, &context).await?;
 
     println!("{}", serde_json::to_string_pretty(&suggestion)?);
     Ok(())

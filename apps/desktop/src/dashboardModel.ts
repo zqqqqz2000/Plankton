@@ -337,7 +337,10 @@ export function getResolvedAutoDecisionEntries(
     seenRequestIds.add(record.request_id);
   }
 
-  return results;
+  return results.sort(
+    (left, right) =>
+      Date.parse(left.recorded_at) - Date.parse(right.recorded_at),
+  );
 }
 
 export function getResolvedReviewRequestEntries(
@@ -383,7 +386,10 @@ export function getResolvedReviewRequestEntries(
     seenRequestIds.add(record.request_id);
   }
 
-  return results;
+  return results.sort(
+    (left, right) =>
+      Date.parse(left.recorded_at) - Date.parse(right.recorded_at),
+  );
 }
 
 export function getSuggestionSummary(

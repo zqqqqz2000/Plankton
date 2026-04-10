@@ -210,6 +210,74 @@ describe("dashboardModel", () => {
     ]);
   });
 
+  it("orders resolved auto decisions from oldest to newest", () => {
+    const entries = getResolvedAutoDecisionEntries([
+      {
+        id: "audit-10",
+        request_id: "request-10",
+        action: "request_submitted",
+        actor: "alice",
+        note: "First auto request",
+        payload: {
+          resource: "secret/first",
+        },
+        created_at: "2026-04-09T12:01:00Z",
+      },
+      {
+        id: "audit-11",
+        request_id: "request-11",
+        action: "request_submitted",
+        actor: "bob",
+        note: "Second auto request",
+        payload: {
+          resource: "secret/second",
+        },
+        created_at: "2026-04-09T12:02:00Z",
+      },
+      {
+        id: "audit-12",
+        request_id: "request-11",
+        action: "automatic_decision_recorded",
+        actor: "system_auto",
+        note: "Second allowed",
+        payload: {
+          auto_disposition: "allow",
+          decision_source: "llm_low_risk_allow",
+          approval_status: "approved",
+          final_decision: "allow",
+          provider_called: true,
+          secret_exposure_risk: false,
+          matched_rule_ids: ["rule-2"],
+          auto_rationale_summary: "Second allowed",
+        },
+        created_at: "2026-04-09T12:04:00Z",
+      },
+      {
+        id: "audit-13",
+        request_id: "request-10",
+        action: "automatic_decision_recorded",
+        actor: "system_auto",
+        note: "First allowed",
+        payload: {
+          auto_disposition: "allow",
+          decision_source: "llm_low_risk_allow",
+          approval_status: "approved",
+          final_decision: "allow",
+          provider_called: true,
+          secret_exposure_risk: false,
+          matched_rule_ids: ["rule-1"],
+          auto_rationale_summary: "First allowed",
+        },
+        created_at: "2026-04-09T12:03:00Z",
+      },
+    ]);
+
+    expect(entries.map((entry) => entry.request_id)).toEqual([
+      "request-10",
+      "request-11",
+    ]);
+  });
+
   it("keeps resolved auto entries even when request submission metadata is absent", () => {
     const entries = getResolvedAutoDecisionEntries([
       {
@@ -305,6 +373,64 @@ describe("dashboardModel", () => {
         reviewed_by: "reviewer.alice",
         decision_note: "Approved for incident response",
       },
+    ]);
+  });
+
+  it("orders resolved review requests from oldest to newest", () => {
+    const entries = getResolvedReviewRequestEntries([
+      {
+        id: "audit-20",
+        request_id: "request-20",
+        action: "request_submitted",
+        actor: "alice",
+        note: "First review request",
+        payload: {
+          resource: "secret/first-review",
+          policy_mode: "assisted",
+        },
+        created_at: "2026-04-09T12:01:00Z",
+      },
+      {
+        id: "audit-21",
+        request_id: "request-21",
+        action: "request_submitted",
+        actor: "bob",
+        note: "Second review request",
+        payload: {
+          resource: "secret/second-review",
+          policy_mode: "manual_only",
+        },
+        created_at: "2026-04-09T12:02:00Z",
+      },
+      {
+        id: "audit-22",
+        request_id: "request-21",
+        action: "approval_recorded",
+        actor: "reviewer.bob",
+        note: "Second approved",
+        payload: {
+          approval_status: "approved",
+          decision: "allow",
+        },
+        created_at: "2026-04-09T12:04:00Z",
+      },
+      {
+        id: "audit-23",
+        request_id: "request-20",
+        action: "approval_recorded",
+        actor: "reviewer.alice",
+        note: "First approved",
+        payload: {
+          approval_status: "approved",
+          decision: "allow",
+        },
+        created_at: "2026-04-09T12:03:00Z",
+      },
+    ]);
+
+    expect(entries.map((entry) => entry.request_id)).toEqual([
+      "request-20",
+      "request-21",
     ]);
   });
 

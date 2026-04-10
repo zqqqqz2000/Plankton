@@ -82,7 +82,17 @@ pub fn evaluate_local_hard_rules(
     let call_chain = context
         .call_chain
         .iter()
-        .map(|value| value.to_ascii_lowercase())
+        .flat_map(|node| {
+            let mut values = Vec::new();
+            if let Some(value) = node.prompt_display_path() {
+                values.push(value.to_ascii_lowercase());
+            }
+            if let Some(value) = node.process_name.as_deref() {
+                values.push(value.to_ascii_lowercase());
+            }
+            values.extend(node.argv.iter().map(|value| value.to_ascii_lowercase()));
+            values
+        })
         .collect::<Vec<_>>();
     let reason_lc = reason.to_ascii_lowercase();
 
@@ -168,10 +178,6 @@ pub fn secret_exposure_risk(sanitized_context: &SanitizedPromptContext) -> bool 
             .redaction_summary
             .to_ascii_lowercase()
             .contains("redacted")
-        || sanitized_context
-            .redaction_summary
-            .to_ascii_lowercase()
-            .contains("trimmed absolute path")
         || sanitized_context
             .redaction_summary
             .to_ascii_lowercase()
@@ -576,6 +582,7 @@ mod tests {
             prompt_contract_version: PROMPT_CONTRACT_VERSION.to_string(),
             prompt_sha256: "digest-1".to_string(),
             prompt: "safe prompt".to_string(),
+            allowed_read_files: Vec::new(),
             sanitized_context: sanitized,
         }
     }

@@ -1,8 +1,10 @@
 use async_openai::{
     config::OpenAIConfig,
     types::chat::{
-        ChatCompletionRequestSystemMessageArgs, ChatCompletionRequestUserMessageArgs,
-        CreateChatCompletionRequestArgs,
+        ChatCompletionMessageToolCalls, ChatCompletionRequestAssistantMessageArgs,
+        ChatCompletionRequestSystemMessageArgs, ChatCompletionRequestToolMessageArgs,
+        ChatCompletionRequestUserMessageArgs, ChatCompletionTool, ChatCompletionTools,
+        CreateChatCompletionRequestArgs, FunctionObjectArgs,
     },
     Client,
 };
@@ -14,10 +16,11 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::{
-    render_llm_advice_template, AcpSessionClient, LlmSuggestion, LlmSuggestionUsage,
-    PlanktonSettings, PolicyMode, ProviderInputSnapshot, ProviderTrace, SanitizedPromptContext,
-    SuggestedDecision, TemplateError, ACP_CODEX_PROVIDER_KIND, LLM_ADVICE_TEMPLATE_ID,
-    LLM_ADVICE_TEMPLATE_VERSION, PROMPT_CONTRACT_VERSION,
+    read_allowlisted_paths_file, render_llm_advice_template, AcpSessionClient, LlmSuggestion,
+    LlmSuggestionUsage, PlanktonSettings, PolicyMode, ProviderInputSnapshot, ProviderTrace,
+    RequestContext, SanitizedPromptContext, SuggestedDecision, TemplateError,
+    ACP_CODEX_PROVIDER_KIND, LLM_ADVICE_TEMPLATE_ID, LLM_ADVICE_TEMPLATE_VERSION,
+    PROMPT_CONTRACT_VERSION,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -28,6 +31,7 @@ pub struct ProviderRequest {
     pub prompt_sha256: String,
     pub policy_mode: PolicyMode,
     pub prompt: String,
+    pub allowed_read_files: Vec<String>,
     pub sanitized_context: SanitizedPromptContext,
 }
 
@@ -128,6 +132,8 @@ pub struct OpenAiCompatibleAdapter {
     temperature: f32,
 }
 
+const OPENAI_READ_FILE_TOOL_NAME: &str = "read_file";
+
 impl OpenAiCompatibleAdapter {
     pub fn try_from_settings(settings: &PlanktonSettings) -> Result<Self, ProviderError> {
         if settings.openai_api_key.trim().is_empty() {
@@ -155,6 +161,29 @@ impl OpenAiCompatibleAdapter {
             temperature: settings.openai_temperature,
         })
     }
+
+    async fn create_chat_completion(
+        &self,
+        messages: Vec<async_openai::types::chat::ChatCompletionRequestMessage>,
+        tools: Option<Vec<ChatCompletionTools>>,
+    ) -> Result<async_openai::types::chat::CreateChatCompletionResponse, ProviderError> {
+        let mut builder = CreateChatCompletionRequestArgs::default();
+        builder
+            .model(self.model.clone())
+            .temperature(self.temperature)
+            .messages(messages);
+        if let Some(tools) = tools {
+            builder.tools(tools).parallel_tool_calls(false);
+        }
+        let completion_request = builder
+            .build()
+            .map_err(|error| ProviderError::RequestBuild(error.to_string()))?;
+        self.client
+            .chat()
+            .create(completion_request)
+            .await
+            .map_err(|error| ProviderError::Transport(error.to_string()))
+    }
 }
 
 #[async_trait]
@@ -172,40 +201,136 @@ impl ProviderAdapter for OpenAiCompatibleAdapter {
             .content(request.prompt)
             .build()
             .map_err(|error| ProviderError::RequestBuild(error.to_string()))?;
-        let completion_request = CreateChatCompletionRequestArgs::default()
-            .model(self.model.clone())
-            .temperature(self.temperature)
-            .messages([system_message.into(), user_message.into()])
-            .build()
-            .map_err(|error| ProviderError::RequestBuild(error.to_string()))?;
+        let mut messages = vec![system_message.into(), user_message.into()];
+        let tools = if request.allowed_read_files.is_empty() {
+            None
+        } else {
+            Some(vec![build_openai_read_file_tool()?])
+        };
         let response = self
-            .client
-            .chat()
-            .create(completion_request)
-            .await
-            .map_err(|error| ProviderError::Transport(error.to_string()))?;
-        let content = response
+            .create_chat_completion(messages.clone(), tools.clone())
+            .await?;
+        let choice = response
             .choices
             .first()
-            .and_then(|choice| choice.message.content.clone())
             .ok_or(ProviderError::EmptyResponse)?;
-        let payload = parse_suggestion_payload(&content)?;
 
-        Ok(ProviderResponse {
-            suggested_decision: payload.suggested_decision,
-            rationale_summary: payload.rationale_summary,
-            risk_score: payload.risk_score.min(100),
-            provider_response_id: Some(response.id),
-            x_request_id: None,
-            provider_trace: None,
-            usage: response.usage.map(|usage| LlmSuggestionUsage {
-                prompt_tokens: usage.prompt_tokens as u32,
-                completion_tokens: usage.completion_tokens as u32,
-                total_tokens: usage.total_tokens as u32,
-            }),
-            model: Some(response.model),
-        })
+        if let Some(tool_calls) = choice.message.tool_calls.clone() {
+            let assistant_message = ChatCompletionRequestAssistantMessageArgs::default()
+                .tool_calls(tool_calls.clone())
+                .build()
+                .map_err(|error| ProviderError::RequestBuild(error.to_string()))?;
+            messages.push(assistant_message.into());
+
+            for tool_call in &tool_calls {
+                let (tool_call_id, content) =
+                    execute_openai_read_file_tool(tool_call, &request.allowed_read_files)?;
+                let tool_message = ChatCompletionRequestToolMessageArgs::default()
+                    .tool_call_id(tool_call_id)
+                    .content(content)
+                    .build()
+                    .map_err(|error| ProviderError::RequestBuild(error.to_string()))?;
+                messages.push(tool_message.into());
+            }
+
+            let followup = self.create_chat_completion(messages, tools).await?;
+            return parse_openai_provider_response(followup);
+        }
+
+        parse_openai_provider_response(response)
     }
+}
+
+#[derive(Debug, Deserialize)]
+struct OpenAiReadFileArgs {
+    path: String,
+}
+
+fn build_openai_read_file_tool() -> Result<ChatCompletionTools, ProviderError> {
+    let function = FunctionObjectArgs::default()
+        .name(OPENAI_READ_FILE_TOOL_NAME)
+        .description(
+            "Read one allowlisted file from the runtime call chain by absolute path. Only use this when the path is already present in the prompt context.",
+        )
+        .parameters(serde_json::json!({
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["path"],
+            "properties": {
+                "path": {
+                    "type": "string",
+                    "minLength": 1
+                }
+            }
+        }))
+        .strict(true)
+        .build()
+        .map_err(|error| ProviderError::RequestBuild(error.to_string()))?;
+
+    Ok(ChatCompletionTools::Function(ChatCompletionTool {
+        function,
+    }))
+}
+
+fn execute_openai_read_file_tool(
+    tool_call: &ChatCompletionMessageToolCalls,
+    allowed_read_files: &[String],
+) -> Result<(String, String), ProviderError> {
+    let ChatCompletionMessageToolCalls::Function(tool_call) = tool_call else {
+        return Err(ProviderError::InvalidResponse(
+            "OpenAI-compatible provider returned an unsupported tool call".to_string(),
+        ));
+    };
+
+    if tool_call.function.name != OPENAI_READ_FILE_TOOL_NAME {
+        return Err(ProviderError::InvalidResponse(format!(
+            "OpenAI-compatible provider requested unexpected tool {}",
+            tool_call.function.name
+        )));
+    }
+
+    let args: OpenAiReadFileArgs =
+        serde_json::from_str(&tool_call.function.arguments).map_err(|error| {
+            ProviderError::InvalidResponse(format!(
+                "OpenAI-compatible read_file tool arguments were invalid JSON: {error}"
+            ))
+        })?;
+    let result = read_allowlisted_paths_file(allowed_read_files, &args.path).map_err(|error| {
+        ProviderError::InvalidResponse(format!(
+            "OpenAI-compatible read_file tool call failed for {}: {error}",
+            args.path
+        ))
+    })?;
+    let content = serde_json::to_string(&result)
+        .map_err(|error| ProviderError::InvalidResponse(error.to_string()))?;
+
+    Ok((tool_call.id.clone(), content))
+}
+
+fn parse_openai_provider_response(
+    response: async_openai::types::chat::CreateChatCompletionResponse,
+) -> Result<ProviderResponse, ProviderError> {
+    let content = response
+        .choices
+        .first()
+        .and_then(|choice| choice.message.content.clone())
+        .ok_or(ProviderError::EmptyResponse)?;
+    let payload = parse_suggestion_payload(&content)?;
+
+    Ok(ProviderResponse {
+        suggested_decision: payload.suggested_decision,
+        rationale_summary: payload.rationale_summary,
+        risk_score: payload.risk_score.min(100),
+        provider_response_id: Some(response.id),
+        x_request_id: None,
+        provider_trace: None,
+        usage: response.usage.map(|usage| LlmSuggestionUsage {
+            prompt_tokens: usage.prompt_tokens as u32,
+            completion_tokens: usage.completion_tokens as u32,
+            total_tokens: usage.total_tokens as u32,
+        }),
+        model: Some(response.model),
+    })
 }
 
 pub const CLAUDE_PROVIDER_KIND: &str = "claude";
@@ -376,9 +501,11 @@ impl ProviderAdapter for AcpCodexAdapter {
 pub async fn generate_llm_suggestion(
     settings: &PlanktonSettings,
     policy_mode: PolicyMode,
+    context: &RequestContext,
     sanitized_context: &SanitizedPromptContext,
 ) -> Result<(ProviderInputSnapshot, LlmSuggestion), ProviderError> {
-    let provider_input = build_provider_input_snapshot(settings, policy_mode, sanitized_context)?;
+    let provider_input =
+        build_provider_input_snapshot(settings, policy_mode, context, sanitized_context)?;
     let suggestion = request_llm_suggestion(settings, policy_mode, &provider_input).await;
 
     Ok((provider_input, suggestion))
@@ -387,6 +514,7 @@ pub async fn generate_llm_suggestion(
 pub fn build_provider_input_snapshot(
     settings: &PlanktonSettings,
     policy_mode: PolicyMode,
+    context: &RequestContext,
     sanitized_context: &SanitizedPromptContext,
 ) -> Result<ProviderInputSnapshot, ProviderError> {
     let prompt = render_llm_advice_template(
@@ -401,6 +529,11 @@ pub fn build_provider_input_snapshot(
         prompt_contract_version: PROMPT_CONTRACT_VERSION.to_string(),
         prompt_sha256: prompt_sha256.clone(),
         prompt: prompt.clone(),
+        allowed_read_files: context
+            .call_chain
+            .iter()
+            .filter_map(|node| node.previewable_path().map(ToOwned::to_owned))
+            .collect(),
         sanitized_context: sanitized_context.clone(),
     })
 }
@@ -417,6 +550,7 @@ pub async fn request_llm_suggestion(
         prompt_sha256: provider_input.prompt_sha256.clone(),
         policy_mode,
         prompt: provider_input.prompt.clone(),
+        allowed_read_files: provider_input.allowed_read_files.clone(),
         sanitized_context: provider_input.sanitized_context.clone(),
     };
     let provider_kind = settings.provider_kind.trim().to_ascii_lowercase();
@@ -854,15 +988,17 @@ mod tests {
         settings.openai_api_base = server.uri();
         settings.openai_api_key = "test-key".to_string();
         settings.openai_model = "mock-model".to_string();
-        let context = sanitize_prompt_context(&RequestContext::new(
+        let raw_context = RequestContext::new(
             "secret/prod".to_string(),
             "Need production access".to_string(),
             "alice".to_string(),
-        ));
+        );
+        let context = sanitize_prompt_context(&raw_context);
 
-        let (_, suggestion) = generate_llm_suggestion(&settings, PolicyMode::Assisted, &context)
-            .await
-            .expect("suggestion generation should succeed");
+        let (_, suggestion) =
+            generate_llm_suggestion(&settings, PolicyMode::Assisted, &raw_context, &context)
+                .await
+                .expect("suggestion generation should succeed");
 
         assert_eq!(suggestion.provider_kind, "openai_compatible");
         assert_eq!(suggestion.suggested_decision, SuggestedDecision::Deny);
@@ -928,15 +1064,17 @@ mod tests {
         settings.claude_api_base = server.uri();
         settings.claude_api_key = "test-key".to_string();
         settings.claude_model = "claude-sonnet-4-5".to_string();
-        let context = sanitize_prompt_context(&RequestContext::new(
+        let raw_context = RequestContext::new(
             "config/dev-readonly".to_string(),
             "Need readonly dev config".to_string(),
             "alice".to_string(),
-        ));
+        );
+        let context = sanitize_prompt_context(&raw_context);
 
-        let (_, suggestion) = generate_llm_suggestion(&settings, PolicyMode::Assisted, &context)
-            .await
-            .expect("suggestion generation should succeed");
+        let (_, suggestion) =
+            generate_llm_suggestion(&settings, PolicyMode::Assisted, &raw_context, &context)
+                .await
+                .expect("suggestion generation should succeed");
 
         assert_eq!(suggestion.provider_kind, CLAUDE_PROVIDER_KIND);
         assert_eq!(suggestion.suggested_decision, SuggestedDecision::Allow);
@@ -1027,14 +1165,15 @@ mod tests {
         settings.claude_api_base = server.uri();
         settings.claude_api_key = "test-key".to_string();
         settings.claude_model = "claude-sonnet-4-5".to_string();
-        let context = sanitize_prompt_context(&RequestContext::new(
+        let raw_context = RequestContext::new(
             "config/dev-readonly".to_string(),
             "Need readonly dev config".to_string(),
             "alice".to_string(),
-        ));
+        );
+        let context = sanitize_prompt_context(&raw_context);
 
         let (_, suggestion) =
-            generate_llm_suggestion(&settings, PolicyMode::LlmAutomatic, &context)
+            generate_llm_suggestion(&settings, PolicyMode::LlmAutomatic, &raw_context, &context)
                 .await
                 .expect("suggestion generation should succeed");
 
@@ -1083,15 +1222,17 @@ mod tests {
         settings.claude_api_base = server.uri();
         settings.claude_api_key = "test-key".to_string();
         settings.claude_model = "claude-sonnet-4-5".to_string();
-        let context = sanitize_prompt_context(&RequestContext::new(
+        let raw_context = RequestContext::new(
             "secret/prod-token".to_string(),
             "Need production token access".to_string(),
             "alice".to_string(),
-        ));
+        );
+        let context = sanitize_prompt_context(&raw_context);
 
-        let (_, suggestion) = generate_llm_suggestion(&settings, PolicyMode::Assisted, &context)
-            .await
-            .expect("suggestion generation should succeed");
+        let (_, suggestion) =
+            generate_llm_suggestion(&settings, PolicyMode::Assisted, &raw_context, &context)
+                .await
+                .expect("suggestion generation should succeed");
 
         assert_eq!(suggestion.provider_kind, CLAUDE_PROVIDER_KIND);
         assert_eq!(suggestion.suggested_decision, SuggestedDecision::Deny);
