@@ -10,14 +10,14 @@ Powered by OpenAquarium
 
 ### 1. Install with Homebrew
 
-The default install path is the project-owned tap and CLI formula:
+The default install path is the project-owned tap and desktop cask:
 
 ```bash
-brew install zqqqqz2000/tap/plankton-cli
-plankton-cli
+brew install --cask zqqqqz2000/tap/plankton
+plankton
 ```
 
-This is not a `homebrew-core` formula and not a desktop cask. The repository is already prepared for this install path, but the first public release is still blocked by external prerequisites: the tap repository and GitHub credentials must be available before the formula can be published for everyone.
+This is a tap-owned cask, not a `homebrew-core` formula. The cask installs both `Plankton.app` and the `plankton` command. An internal helper formula may still exist inside the tap, but it is not the user-facing entrypoint.
 
 ### 2. Install from source for local development
 
@@ -44,10 +44,10 @@ Keep the desktop window open. Daily use is centered on the UI.
 
 ### 5. Use the CLI for access attempts and read-only inspection
 
-Create an access attempt:
+Create an access attempt with the installed command:
 
 ```bash
-cargo run -p plankton-cli -- get secret/api-token \
+plankton get secret/api-token \
   --reason "Need readonly dev config" \
   --requested-by alice
 ```
@@ -55,13 +55,15 @@ cargo run -p plankton-cli -- get secret/api-token \
 Inspect the same request from the CLI:
 
 ```bash
-cargo run -p plankton-cli -- queue
-cargo run -p plankton-cli -- status <request-id>
-cargo run -p plankton-cli -- suggestion <request-id>
-cargo run -p plankton-cli -- audit --limit 20
+plankton queue
+plankton status <request-id>
+plankton suggestion <request-id>
+plankton audit --limit 20
 ```
 
 `queue` is the current list-style query surface. Human approval does not happen here; it happens in the desktop UI.
+
+If you are working from a source checkout instead of the cask, run the same commands with `cargo run -p plankton -- ...`.
 
 ### 6. Configure a provider only when you need assisted or auto
 

@@ -1,6 +1,6 @@
 [package]
-name = "plankton-cli"
-description = "Read-only CLI for Plankton access attempts, request inspection, and audit queries"
+name = "plankton"
+description = "Command-line companion for Plankton access attempts, request inspection, and audit queries"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

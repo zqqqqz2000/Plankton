@@ -83,7 +83,7 @@ Keep the desktop app running.
 From another terminal:
 
 ```bash
-cargo run -p plankton-cli -- get secret/api-key \
+cargo run -p plankton -- get secret/api-key \
   --reason "Need local smoke test access" \
   --requested-by alice \
   --script-path scripts/smoke.sh \
@@ -103,9 +103,9 @@ Expected result:
 Use the CLI:
 
 ```bash
-cargo run -p plankton-cli -- queue
-cargo run -p plankton-cli -- status <request-id>
-cargo run -p plankton-cli -- suggestion <request-id>
+cargo run -p plankton -- queue
+cargo run -p plankton -- status <request-id>
+cargo run -p plankton -- suggestion <request-id>
 ```
 
 Expected result:
@@ -134,8 +134,8 @@ Expected result:
 Back in the terminal:
 
 ```bash
-cargo run -p plankton-cli -- status <request-id>
-cargo run -p plankton-cli -- audit --limit 20
+cargo run -p plankton -- status <request-id>
+cargo run -p plankton -- audit --limit 20
 ```
 
 Expected result after approval:

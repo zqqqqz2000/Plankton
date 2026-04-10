@@ -9,8 +9,6 @@ fi
 version="$1"
 github_repository="$2"
 checksums_file="$3"
-formula_class="PlanktonHelper"
-binary_name="plankton"
 homepage_url="https://github.com/${github_repository}"
 
 lookup_sha() {
@@ -18,7 +16,7 @@ lookup_sha() {
   awk -v file="$archive_name" '$2 == file { print $1; exit }' "$checksums_file"
 }
 
-archive_name="plankton-v${version}-aarch64-apple-darwin.tar.gz"
+archive_name="plankton-v${version}-macos-aarch64.zip"
 archive_sha="$(lookup_sha "$archive_name")"
 
 if [ -z "$archive_sha" ]; then
@@ -27,21 +25,17 @@ if [ -z "$archive_sha" ]; then
 fi
 
 cat <<EOF
-class ${formula_class} < Formula
-  desc "Command-line companion installed by the Plankton desktop cask"
-  homepage "${homepage_url}"
-  license "MIT"
-  url "${homepage_url}/releases/download/v${version}/plankton-v${version}-aarch64-apple-darwin.tar.gz"
+cask "plankton" do
+  version "${version}"
   sha256 "${archive_sha}"
 
-  def install
-    bin.install "${binary_name}"
-    prefix.install_metafiles
-  end
+  url "${homepage_url}/releases/download/v#{version}/plankton-v#{version}-macos-aarch64.zip"
+  name "Plankton"
+  desc "Local-first approval console for sensitive resource access"
+  homepage "${homepage_url}"
 
-  test do
-    help = shell_output("#{bin}/${binary_name} --help")
-    assert_match "read-only", help
-  end
+  depends_on formula: "plankton-helper"
+
+  app "Plankton.app"
 end
 EOF

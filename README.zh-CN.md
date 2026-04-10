@@ -10,14 +10,14 @@ Powered by OpenAquarium
 
 ### 1. 通过 Homebrew 安装
 
-默认安装路径是项目自有 tap 加 CLI formula：
+默认安装路径是项目自有 tap 加 desktop cask：
 
 ```bash
-brew install zqqqqz2000/tap/plankton-cli
-plankton-cli
+brew install --cask zqqqqz2000/tap/plankton
+plankton
 ```
 
-这不是 `homebrew-core` formula，也不是 desktop cask。仓库已经按这条安装路径准备好了，但第一次对外发布仍受外部前提阻塞：必须先具备 tap 仓库和 GitHub 凭据，这条安装方式才能真正对所有人可用。
+这是一条 tap 自有 cask 路径，不是 `homebrew-core` formula。这个 cask 会一起安装 `Plankton.app` 和 `plankton` 命令；tap 里即使仍存在内部 helper formula，它也不是面向用户的主入口。
 
 ### 2. 通过源码安装并准备本地开发环境
 
@@ -44,10 +44,10 @@ make tauri-dev
 
 ### 5. 用 CLI 发起访问尝试并做只读查询
 
-发起一次访问尝试：
+用安装后的命令发起一次访问尝试：
 
 ```bash
-cargo run -p plankton-cli -- get secret/api-token \
+plankton get secret/api-token \
   --reason "Need readonly dev config" \
   --requested-by alice
 ```
@@ -55,13 +55,15 @@ cargo run -p plankton-cli -- get secret/api-token \
 在 CLI 中查询同一条请求：
 
 ```bash
-cargo run -p plankton-cli -- queue
-cargo run -p plankton-cli -- status <request-id>
-cargo run -p plankton-cli -- suggestion <request-id>
-cargo run -p plankton-cli -- audit --limit 20
+plankton queue
+plankton status <request-id>
+plankton suggestion <request-id>
+plankton audit --limit 20
 ```
 
 `queue` 是当前的列表式查询入口。人工审批不在这里完成，而是在桌面 UI 中完成。
+
+如果你当前是在源码仓库里做本地开发，而不是使用 cask 安装，可以把同样的命令换成 `cargo run -p plankton -- ...`。
 
 ### 6. 只有在需要 assisted 或 auto 时才配置 provider
 

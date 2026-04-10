@@ -16,9 +16,9 @@ use tracing_subscriber::{fmt, EnvFilter};
 #[command(
     author,
     version,
-    about = "Plankton CLI for submitting access attempts and reading request, suggestion, and audit state",
+    about = "Plankton command-line companion for submitting access attempts and reading request, suggestion, and audit state",
     arg_required_else_help = true,
-    after_help = "Examples:\n  cargo run -p plankton-cli -- get secret/api-token --reason \"Smoke test\" --requested-by alice\n  cargo run -p plankton-cli -- get secret/api-token --reason \"Auto smoke\" --policy-mode auto\n  cargo run -p plankton-cli -- status <request-id>\n  cargo run -p plankton-cli -- suggestion <request-id>\n  cargo run -p plankton-cli -- queue --limit 10\n  cargo run -p plankton-cli -- audit <request-id>\n\nHuman approvals happen in the desktop UI. After submission, this CLI is read-only."
+    after_help = "Examples:\n  plankton get secret/api-token --reason \"Smoke test\" --requested-by alice\n  plankton get secret/api-token --reason \"Auto smoke\" --policy-mode auto\n  plankton status <request-id>\n  plankton suggestion <request-id>\n  plankton queue --limit 10\n  plankton audit <request-id>\n\nHuman approvals happen in the desktop UI. After submission, this CLI is read-only."
 )]
 struct Cli {
     #[arg(
@@ -841,14 +841,11 @@ fn classify_risk(score: u8) -> &'static str {
 fn render_submission_text(request: &AccessRequest) -> String {
     let mut lines = vec![
         render_request_text(request),
-        format!(
-            "next_action: cargo run -p plankton-cli -- status {}",
-            request.id
-        ),
+        format!("next_action: plankton status {}", request.id),
     ];
     if request.llm_suggestion.is_some() {
         lines.push(format!(
-            "next_suggestion_action: cargo run -p plankton-cli -- suggestion {}",
+            "next_suggestion_action: plankton suggestion {}",
             request.id
         ));
     }
@@ -864,7 +861,7 @@ fn render_status_text(result: &RequestQueryResult) -> String {
         ];
         if result.request.llm_suggestion.is_some() {
             lines.push(format!(
-                "suggestion_view: cargo run -p plankton-cli -- suggestion {}",
+                "suggestion_view: plankton suggestion {}",
                 result.request.id
             ));
         }
@@ -895,7 +892,7 @@ fn render_status_text(result: &RequestQueryResult) -> String {
     ];
     if result.request.llm_suggestion.is_some() {
         lines.push(format!(
-            "suggestion_view: cargo run -p plankton-cli -- suggestion {}",
+            "suggestion_view: plankton suggestion {}",
             result.request.id
         ));
     }
@@ -1657,7 +1654,7 @@ mod tests {
     #[test]
     fn parses_get_command_with_positional_resource() {
         let cli = Cli::try_parse_from([
-            "plankton-cli",
+            "plankton",
             "get",
             "secret/api-token",
             "--reason",
@@ -1685,7 +1682,7 @@ mod tests {
     #[test]
     fn parses_request_alias_with_legacy_resource_flag() {
         let cli = Cli::try_parse_from([
-            "plankton-cli",
+            "plankton",
             "request",
             "--resource",
             "secret/api-token",
@@ -1707,7 +1704,7 @@ mod tests {
     #[test]
     fn parses_assisted_policy_mode() {
         let cli = Cli::try_parse_from([
-            "plankton-cli",
+            "plankton",
             "get",
             "secret/api-token",
             "--reason",
@@ -1728,7 +1725,7 @@ mod tests {
     #[test]
     fn parses_auto_policy_mode() {
         let cli = Cli::try_parse_from([
-            "plankton-cli",
+            "plankton",
             "get",
             "secret/api-token",
             "--reason",
@@ -1749,7 +1746,7 @@ mod tests {
     #[test]
     fn parses_legacy_manual_only_policy_mode_alias() {
         let cli = Cli::try_parse_from([
-            "plankton-cli",
+            "plankton",
             "get",
             "secret/api-token",
             "--reason",
@@ -1769,7 +1766,7 @@ mod tests {
 
     #[test]
     fn parses_suggestion_command_happy_path() {
-        let cli = Cli::try_parse_from(["plankton-cli", "suggestion", "request-123"])
+        let cli = Cli::try_parse_from(["plankton", "suggestion", "request-123"])
             .expect("suggestion command should parse");
 
         match cli.command {
@@ -1794,9 +1791,9 @@ mod tests {
 
     #[test]
     fn rejects_removed_review_commands() {
-        let approve_error = Cli::try_parse_from(["plankton-cli", "approve", "request-123"])
+        let approve_error = Cli::try_parse_from(["plankton", "approve", "request-123"])
             .expect_err("approve should no longer parse");
-        let reject_error = Cli::try_parse_from(["plankton-cli", "reject", "request-123"])
+        let reject_error = Cli::try_parse_from(["plankton", "reject", "request-123"])
             .expect_err("reject should no longer parse");
 
         assert!(approve_error

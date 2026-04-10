@@ -19,7 +19,9 @@ struct DesktopPreferences {
     default_policy_mode: PolicyMode,
 }
 
-fn lock_settings(state: &State<'_, AppState>) -> Result<std::sync::MutexGuard<'_, PlanktonSettings>, String> {
+fn lock_settings<'a>(
+    state: &'a State<'a, AppState>,
+) -> Result<std::sync::MutexGuard<'a, PlanktonSettings>, String> {
     state
         .settings
         .lock()

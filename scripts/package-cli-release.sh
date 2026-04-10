@@ -18,13 +18,13 @@ fi
 
 mkdir -p "$output_dir"
 
-archive_name="plankton-cli-v${version}-${target}.tar.gz"
+archive_name="plankton-v${version}-${target}.tar.gz"
 staging_dir="$(mktemp -d)"
 trap 'rm -rf "$staging_dir"' EXIT
 
-cp "$binary_path" "$staging_dir/plankton-cli"
-chmod 0755 "$staging_dir/plankton-cli"
+cp "$binary_path" "$staging_dir/plankton"
+chmod 0755 "$staging_dir/plankton"
 cp LICENSE "$staging_dir/LICENSE"
 cp README.md "$staging_dir/README.md"
 
-tar -C "$staging_dir" -czf "$output_dir/$archive_name" plankton-cli LICENSE README.md
+tar -C "$staging_dir" -czf "$output_dir/$archive_name" plankton LICENSE README.md
