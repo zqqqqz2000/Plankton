@@ -40,7 +40,7 @@ class ${formula_class} < Formula
 
   def install
     system "cargo", "install", "--locked", "--path", "crates/plankton-cli", "--root", prefix
-    prefix.install_metafiles "LICENSE", "README.md"
+    prefix.install_metafiles
   end
 
   test do
