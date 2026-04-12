@@ -820,7 +820,7 @@ fn build_acp_trace_view_from_parts(
     acp_transport: Option<String>,
     acp_client_request_id: Option<String>,
 ) -> Option<AcpTraceView> {
-    if provider_kind != Some("acp_codex") {
+    if !matches!(provider_kind, Some("acp" | "acp_codex")) {
         return None;
     }
 
@@ -2470,7 +2470,7 @@ mod tests {
             rationale_summary: "ACP assistant found a low-risk dev token access request"
                 .to_string(),
             risk_score: 12,
-            provider_kind: "acp_codex".to_string(),
+            provider_kind: "acp".to_string(),
             provider_model: Some("codex-mini".to_string()),
             provider_response_id: Some("resp-acp-123".to_string()),
             x_request_id: Some("trace-acp-123".to_string()),
@@ -2499,7 +2499,7 @@ mod tests {
         let request = AccessRequest::new_pending(
             context,
             PolicyMode::Assisted,
-            Some("acp_codex".to_string()),
+            Some("acp".to_string()),
             "rendered prompt".to_string(),
             None,
             Some(suggestion),
@@ -2515,7 +2515,7 @@ mod tests {
         let rendered_audit =
             render_audit_text(std::slice::from_ref(&audit_record), Some(&request.id));
 
-        assert!(rendered.contains("provider_kind: acp_codex"));
+        assert!(rendered.contains("provider_kind: acp"));
         assert!(rendered.contains("acp_session_id: session-acp-123"));
         assert!(rendered.contains("acp_agent_name: codex-acp"));
         assert!(rendered.contains("acp_agent_version: 0.11.1"));
@@ -2536,7 +2536,7 @@ mod tests {
                 .first()
                 .and_then(|record| record.suggestion.as_ref())
                 .and_then(|suggestion| suggestion.provider_kind.as_deref()),
-            Some("acp_codex")
+            Some("acp")
         );
         assert_eq!(
             audit_output
@@ -2547,7 +2547,7 @@ mod tests {
                 .and_then(|trace| trace.acp_transport.as_deref()),
             Some("stdio")
         );
-        assert!(rendered_audit.contains("provider_kind: acp_codex"));
+        assert!(rendered_audit.contains("provider_kind: acp"));
         assert!(rendered_audit.contains("acp_session_id: session-acp-123"));
         assert!(rendered_audit.contains("acp_package_version: 0.11.1"));
     }

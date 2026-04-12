@@ -13,7 +13,9 @@ use crate::template::{
 };
 use crate::PolicyMode;
 
-pub const DEFAULT_USER_PROVIDER_KIND: &str = "acp_codex";
+pub const DEFAULT_USER_PROVIDER_KIND: &str = "acp";
+const DEFAULT_ACP_PROGRAM: &str = "npx";
+const DEFAULT_ACP_ARGS: &str = "-y @zed-industries/codex-acp@0.11.1";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PlanktonSettings {
@@ -80,8 +82,8 @@ impl Default for PlanktonSettings {
             claude_max_tokens: 512,
             claude_temperature: 0.0,
             claude_timeout_secs: 30,
-            acp_codex_program: "npx".to_string(),
-            acp_codex_args: "-y @zed-industries/codex-acp@0.11.1".to_string(),
+            acp_codex_program: DEFAULT_ACP_PROGRAM.to_string(),
+            acp_codex_args: DEFAULT_ACP_ARGS.to_string(),
             acp_timeout_secs: 30,
             recent_audit_limit: 20,
         }
@@ -115,7 +117,7 @@ impl UserSettings {
     fn normalized(&self) -> Self {
         Self {
             default_policy_mode: self.default_policy_mode,
-            provider_kind: self.provider_kind.trim().to_string(),
+            provider_kind: canonicalize_provider_kind(&self.provider_kind),
             openai_api_base: self.openai_api_base.trim().to_string(),
             openai_api_key: self.openai_api_key.clone(),
             openai_model: self.openai_model.trim().to_string(),
@@ -208,8 +210,11 @@ fn load_settings_from_path(
     let config = builder
         .add_source(Environment::with_prefix("PLANKTON").separator("__"))
         .build()?;
+    let acp_program_alias = config.get_string("acp_program").ok();
+    let acp_args_alias = config.get_string("acp_args").ok();
 
     let mut settings: PlanktonSettings = config.try_deserialize()?;
+    apply_generic_acp_config_aliases(acp_program_alias, acp_args_alias, &mut settings);
     apply_env_overrides(&mut settings);
     normalize_user_provider_kind(&mut settings);
 
@@ -352,16 +357,14 @@ fn apply_env_overrides(settings: &mut PlanktonSettings) {
         }
     }
 
-    if let Ok(program) = std::env::var("PLANKTON_ACP_CODEX_PROGRAM") {
-        if !program.trim().is_empty() {
-            settings.acp_codex_program = program;
-        }
+    if let Some(program) =
+        first_non_empty_env(&["PLANKTON_ACP_PROGRAM", "PLANKTON_ACP_CODEX_PROGRAM"])
+    {
+        settings.acp_codex_program = program;
     }
 
-    if let Ok(args) = std::env::var("PLANKTON_ACP_CODEX_ARGS") {
-        if !args.trim().is_empty() {
-            settings.acp_codex_args = args;
-        }
+    if let Some(args) = first_present_env(&["PLANKTON_ACP_ARGS", "PLANKTON_ACP_CODEX_ARGS"]) {
+        settings.acp_codex_args = args;
     }
 
     if let Ok(timeout_secs) = std::env::var("PLANKTON_ACP_TIMEOUT_SECS") {
@@ -378,18 +381,48 @@ fn apply_env_overrides(settings: &mut PlanktonSettings) {
 }
 
 fn normalize_user_provider_kind(settings: &mut PlanktonSettings) {
-    if std::env::var("PLANKTON_PROVIDER_KIND")
-        .ok()
-        .is_some_and(|value| !value.trim().is_empty())
-    {
-        return;
-    }
-
-    let normalized = settings.provider_kind.trim().to_ascii_lowercase();
+    let normalized = canonicalize_provider_kind(&settings.provider_kind);
     if normalized.is_empty() || normalized == "mock" {
         settings.provider_kind = DEFAULT_USER_PROVIDER_KIND.to_string();
     } else {
         settings.provider_kind = normalized;
+    }
+}
+
+fn apply_generic_acp_config_aliases(
+    acp_program: Option<String>,
+    acp_args: Option<String>,
+    settings: &mut PlanktonSettings,
+) {
+    if let Some(program) = acp_program {
+        if !program.trim().is_empty() {
+            settings.acp_codex_program = program;
+        }
+    }
+
+    if let Some(args) = acp_args {
+        settings.acp_codex_args = args;
+    }
+}
+
+fn first_non_empty_env(keys: &[&str]) -> Option<String> {
+    keys.iter().find_map(|key| {
+        std::env::var(key)
+            .ok()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+    })
+}
+
+fn first_present_env(keys: &[&str]) -> Option<String> {
+    keys.iter().find_map(|key| std::env::var(key).ok())
+}
+
+fn canonicalize_provider_kind(value: &str) -> String {
+    let normalized = value.trim().to_ascii_lowercase();
+    match normalized.as_str() {
+        "acp_codex" => DEFAULT_USER_PROVIDER_KIND.to_string(),
+        _ => normalized,
     }
 }
 
@@ -468,17 +501,19 @@ fn save_user_settings_to_path(
         TomlValue::Integer(normalized.claude_timeout_secs as i64),
     );
     table.insert(
-        "acp_codex_program".to_string(),
+        "acp_program".to_string(),
         TomlValue::String(normalized.acp_codex_program),
     );
     table.insert(
-        "acp_codex_args".to_string(),
+        "acp_args".to_string(),
         TomlValue::String(normalized.acp_codex_args),
     );
     table.insert(
         "acp_timeout_secs".to_string(),
         TomlValue::Integer(normalized.acp_timeout_secs as i64),
     );
+    table.remove("acp_codex_program");
+    table.remove("acp_codex_args");
 
     write_user_settings_document(path, &document)
 }
@@ -642,6 +677,10 @@ mod tests {
         assert!(written.contains("request_template = \"keep-me\""));
         assert!(written.contains("provider_kind = \"claude\""));
         assert!(written.contains("claude_timeout_secs = 45"));
+        assert!(written.contains("acp_program = \"npx\""));
+        assert!(written.contains("acp_args = \"-y codex-acp\""));
+        assert!(!written.contains("acp_codex_program"));
+        assert!(!written.contains("acp_codex_args"));
 
         let _ = std::fs::remove_file(&path);
     }
@@ -696,7 +735,7 @@ mod tests {
             load_settings_from_path(&path, false).expect("settings should load from custom path");
 
         assert_eq!(loaded.default_policy_mode, PolicyMode::Assisted);
-        assert_eq!(loaded.provider_kind, "acp_codex");
+        assert_eq!(loaded.provider_kind, DEFAULT_USER_PROVIDER_KIND);
 
         let _ = std::fs::remove_file(&path);
     }
@@ -738,7 +777,7 @@ mod tests {
     }
 
     #[test]
-    fn upgrades_legacy_mock_provider_setting_to_acp_codex_on_load() {
+    fn upgrades_legacy_mock_provider_setting_to_default_acp_on_load() {
         let path = temp_settings_path("upgrade-legacy-mock-provider");
         std::fs::create_dir_all(path.parent().expect("temp parent should exist"))
             .expect("temp parent should be created");
@@ -749,6 +788,43 @@ mod tests {
             load_settings_from_path(&path, false).expect("settings should load from custom path");
 
         assert_eq!(loaded.provider_kind, DEFAULT_USER_PROVIDER_KIND);
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn upgrades_legacy_acp_codex_provider_kind_to_generic_acp_on_load() {
+        let path = temp_settings_path("upgrade-legacy-acp-provider-kind");
+        std::fs::create_dir_all(path.parent().expect("temp parent should exist"))
+            .expect("temp parent should be created");
+        std::fs::write(&path, "provider_kind = \"acp_codex\"\n")
+            .expect("legacy settings file should be written");
+
+        let loaded =
+            load_settings_from_path(&path, false).expect("settings should load from custom path");
+
+        assert_eq!(loaded.provider_kind, DEFAULT_USER_PROVIDER_KIND);
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn loads_generic_acp_program_keys_from_settings_file() {
+        let path = temp_settings_path("generic-acp-program-keys");
+        std::fs::create_dir_all(path.parent().expect("temp parent should exist"))
+            .expect("temp parent should be created");
+        std::fs::write(
+            &path,
+            "provider_kind = \"acp\"\nacp_program = \"custom-acp\"\nacp_args = \"\"\n",
+        )
+        .expect("settings file should be written");
+
+        let loaded =
+            load_settings_from_path(&path, false).expect("settings should load from custom path");
+
+        assert_eq!(loaded.provider_kind, "acp");
+        assert_eq!(loaded.acp_codex_program, "custom-acp");
+        assert_eq!(loaded.acp_codex_args, "");
 
         let _ = std::fs::remove_file(&path);
     }

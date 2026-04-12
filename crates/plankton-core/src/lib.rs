@@ -9,8 +9,8 @@ pub mod template;
 pub mod value_resolver;
 
 pub use acp::{
-    AcpPromptResult, AcpSessionClient, AcpSessionConfig, ACP_CODEX_PACKAGE_NAME,
-    ACP_CODEX_PACKAGE_VERSION, ACP_CODEX_PROVIDER_KIND, ACP_TRANSPORT_STDIO,
+    AcpPromptResult, AcpSessionClient, AcpSessionConfig, ACP_DEFAULT_ARGS, ACP_DEFAULT_PROGRAM,
+    ACP_LEGACY_CODEX_PROVIDER_KIND, ACP_PROVIDER_KIND, ACP_TRANSPORT_STDIO,
 };
 pub use automatic::{
     escalate_for_secret_exposure_risk, evaluate_automatic_disposition, evaluate_local_hard_rules,
@@ -34,10 +34,9 @@ pub use domain::{
     RequestContext, SanitizedPromptContext, SuggestedDecision,
 };
 pub use provider::{
-    build_provider_input_snapshot, generate_llm_suggestion, request_llm_suggestion,
-    AcpCodexAdapter, ClaudeAdapter, ClaudeMessagesAdapter, MockProviderAdapter,
-    OpenAiCompatibleAdapter, ProviderAdapter, ProviderError, ProviderRequest, ProviderResponse,
-    CLAUDE_PROVIDER_KIND,
+    build_provider_input_snapshot, generate_llm_suggestion, request_llm_suggestion, AcpAdapter,
+    ClaudeAdapter, ClaudeMessagesAdapter, MockProviderAdapter, OpenAiCompatibleAdapter,
+    ProviderAdapter, ProviderError, ProviderRequest, ProviderResponse, CLAUDE_PROVIDER_KIND,
 };
 pub use sanitization::{sanitize_prompt_context, sanitize_request_context_for_storage};
 pub use template::{

@@ -13,9 +13,10 @@ use uuid::Uuid;
 
 use crate::{PlanktonSettings, ProviderError, ProviderTrace};
 
-pub const ACP_CODEX_PROVIDER_KIND: &str = "acp_codex";
-pub const ACP_CODEX_PACKAGE_NAME: &str = "@zed-industries/codex-acp";
-pub const ACP_CODEX_PACKAGE_VERSION: &str = "0.11.1";
+pub const ACP_PROVIDER_KIND: &str = "acp";
+pub const ACP_LEGACY_CODEX_PROVIDER_KIND: &str = "acp_codex";
+pub const ACP_DEFAULT_PROGRAM: &str = "npx";
+pub const ACP_DEFAULT_ARGS: &str = "-y @zed-industries/codex-acp@0.11.1";
 pub const ACP_TRANSPORT_STDIO: &str = "stdio";
 
 #[derive(Debug, Clone)]
@@ -26,8 +27,8 @@ pub struct AcpSessionConfig {
     pub timeout: Duration,
     pub client_name: String,
     pub client_version: String,
-    pub package_name: String,
-    pub package_version: String,
+    pub package_name: Option<String>,
+    pub package_version: Option<String>,
     pub transport: String,
 }
 
@@ -36,17 +37,13 @@ impl AcpSessionConfig {
         let program = settings.acp_codex_program.trim();
         if program.is_empty() {
             return Err(ProviderError::Config(
-                "PLANKTON_ACP_CODEX_PROGRAM must be set for acp_codex".to_string(),
+                "PLANKTON_ACP_PROGRAM must be set for the ACP provider".to_string(),
             ));
         }
 
         let args = shell_words::split(settings.acp_codex_args.trim())
             .map_err(|error| ProviderError::Config(format!("invalid ACP args: {error}")))?;
-        if args.is_empty() {
-            return Err(ProviderError::Config(
-                "PLANKTON_ACP_CODEX_ARGS must contain the codex-acp package invocation".to_string(),
-            ));
-        }
+        let (package_name, package_version) = infer_acp_package_identity(&args);
 
         let cwd = std::env::current_dir()
             .map_err(|error| ProviderError::Transport(format!("failed to resolve cwd: {error}")))?
@@ -62,8 +59,8 @@ impl AcpSessionConfig {
             timeout: Duration::from_secs(settings.acp_timeout_secs.max(1)),
             client_name: "plankton".to_string(),
             client_version: env!("CARGO_PKG_VERSION").to_string(),
-            package_name: ACP_CODEX_PACKAGE_NAME.to_string(),
-            package_version: ACP_CODEX_PACKAGE_VERSION.to_string(),
+            package_name,
+            package_version,
             transport: ACP_TRANSPORT_STDIO.to_string(),
         })
     }
@@ -295,8 +292,8 @@ async fn run_acp_prompt_local(
             api_version: None,
             output_format: None,
             stop_reason: None,
-            package_name: Some(config.package_name),
-            package_version: Some(config.package_version),
+            package_name: config.package_name,
+            package_version: config.package_version,
             session_id: Some(session_response.session_id.to_string()),
             client_request_id: Some(client_request_id),
             agent_name,
@@ -324,6 +321,43 @@ fn build_provider_model(agent_name: Option<&str>, agent_version: Option<&str>) -
         (_, Some(version)) if !version.trim().is_empty() => Some(version.to_string()),
         _ => None,
     }
+}
+
+fn infer_acp_package_identity(args: &[String]) -> (Option<String>, Option<String>) {
+    args.iter()
+        .filter(|arg| !arg.trim().is_empty() && !arg.starts_with('-'))
+        .find_map(|arg| parse_package_spec(arg))
+        .unwrap_or((None, None))
+}
+
+fn parse_package_spec(arg: &str) -> Option<(Option<String>, Option<String>)> {
+    let value = arg.strip_prefix("npm:").unwrap_or(arg).trim();
+    if value.is_empty() || value.starts_with('.') || value.starts_with('/') {
+        return None;
+    }
+
+    if let Some(package) = value.strip_prefix('@') {
+        let split_index = package.rfind('@')?;
+        let (name, version) = package.split_at(split_index);
+        let version = version.strip_prefix('@')?;
+        if name.is_empty() {
+            return None;
+        }
+        return Some((Some(format!("@{name}")), non_empty_string(version)));
+    }
+
+    if let Some((name, version)) = value.rsplit_once('@') {
+        if !name.is_empty() {
+            return Some((Some(name.to_string()), non_empty_string(version)));
+        }
+    }
+
+    Some((Some(value.to_string()), None))
+}
+
+fn non_empty_string(value: &str) -> Option<String> {
+    let trimmed = value.trim();
+    (!trimmed.is_empty()).then(|| trimmed.to_string())
 }
 
 #[cfg(test)]
@@ -496,8 +530,8 @@ mod tests {
                     timeout: Duration::from_secs(5),
                     client_name: "plankton".to_string(),
                     client_version: "0.1.0".to_string(),
-                    package_name: ACP_CODEX_PACKAGE_NAME.to_string(),
-                    package_version: ACP_CODEX_PACKAGE_VERSION.to_string(),
+                    package_name: None,
+                    package_version: None,
                     transport: ACP_TRANSPORT_STDIO.to_string(),
                 };
 
@@ -526,10 +560,7 @@ mod tests {
             result.provider_model.as_deref(),
             Some("mock-codex-acp@0.11.1")
         );
-        assert_eq!(
-            result.trace.package_name.as_deref(),
-            Some(ACP_CODEX_PACKAGE_NAME)
-        );
+        assert_eq!(result.trace.package_name.as_deref(), None);
         assert_eq!(result.trace.transport.as_deref(), Some(ACP_TRANSPORT_STDIO));
         assert_eq!(result.trace.agent_name.as_deref(), Some("mock-codex-acp"));
         assert_eq!(result.trace.agent_version.as_deref(), Some("0.11.1"));
@@ -552,5 +583,31 @@ mod tests {
                 .contains("suggestion-only path fail-closed"),
             "unexpected error: {error}"
         );
+    }
+
+    #[test]
+    fn infers_package_identity_from_default_codex_args() {
+        let args = shell_words::split(ACP_DEFAULT_ARGS).expect("default args should parse");
+
+        let (package_name, package_version) = infer_acp_package_identity(&args);
+
+        assert_eq!(package_name.as_deref(), Some("@zed-industries/codex-acp"));
+        assert_eq!(package_version.as_deref(), Some("0.11.1"));
+    }
+
+    #[test]
+    fn allows_generic_acp_program_without_args() {
+        let mut settings = PlanktonSettings::default();
+        settings.provider_kind = ACP_PROVIDER_KIND.to_string();
+        settings.acp_codex_program = "custom-acp-client".to_string();
+        settings.acp_codex_args = String::new();
+
+        let config = AcpSessionConfig::from_settings(&settings)
+            .expect("generic ACP program without args should be allowed");
+
+        assert_eq!(config.program, "custom-acp-client");
+        assert!(config.args.is_empty());
+        assert_eq!(config.package_name, None);
+        assert_eq!(config.package_version, None);
     }
 }
