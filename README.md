@@ -74,7 +74,7 @@ If you need machine-readable output instead of a bare value, use `--output json`
 
 The value itself is resolved at runtime from the local secret catalog, not from SQLite, audit records, or provider payloads. If your environment uses an explicit catalog file, point Plankton at it before running `get` (for example with `PLANKTON_SECRET_FILE=/abs/path/...`).
 
-If the request cannot be completed automatically, Plankton hands off to the desktop UI. Human approval, suggestion review, and audit inspection all happen there. Non-success paths keep `stdout` empty and report status or errors separately.
+If the request cannot be completed automatically, Plankton hands off to the desktop UI. Human approval, suggestion review, and audit inspection all happen there. Non-success paths keep `stdout` empty and report status or errors separately. When a request is denied and the recorded decision includes a reason or note, Plankton appends that reason to the deny error. When no reason was recorded, the deny output stays concise.
 
 If you are working from a source checkout instead of the cask, run the same commands with `cargo run -p plankton -- ...`.
 

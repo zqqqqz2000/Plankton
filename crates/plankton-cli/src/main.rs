@@ -32,7 +32,7 @@ const GET_POLL_INTERVAL: Duration = Duration::from_millis(250);
     version,
     about = "Plankton command-line companion for listing, searching, and requesting access",
     arg_required_else_help = true,
-    after_help = "Examples:\n  plankton list\n  plankton search api-token\n  plankton get secret/api-token --reason \"Smoke test\" --requested-by alice\n  plankton get secret/api-token --reason \"Auto smoke\" --policy-mode auto\n  plankton get secret/api-token --reason \"Scripted smoke\" --output json\n\nSuccessful `get` text output prints only the resolved secret value. Use `--output json` for a minimal machine-readable envelope.\n\nHuman approvals and request history live in the desktop UI. The public CLI surface is intentionally limited to `get`, `list`, and `search`."
+    after_help = "Examples:\n  plankton list\n  plankton search api-token\n  plankton get secret/api-token --reason \"Smoke test\" --requested-by alice\n  plankton get secret/api-token --reason \"Auto smoke\" --policy-mode auto\n  plankton get secret/api-token --reason \"Scripted smoke\" --output json\n\nSuccessful `get` text output prints only the resolved secret value. Use `--output json` for a minimal machine-readable envelope. When a request is denied and a recorded reason is available, Plankton appends that reason to the deny error.\n\nHuman approvals and request history live in the desktop UI. The public CLI surface is intentionally limited to `get`, `list`, and `search`."
 )]
 struct Cli {
     #[arg(
@@ -76,7 +76,7 @@ enum Commands {
     #[command(
         visible_alias = "request",
         about = "Request access to one resource and print only its resolved value on successful text output",
-        after_help = "Output contract:\n  text (default): when Plankton both allows the request and resolves the value, stdout prints only the raw value.\n  json: prints a minimal envelope for scripts and tooling.\n  deny, pending, or resolver errors: stdout stays empty and the error or status is reported on stderr.\n\nValue source:\n  Values are resolved at runtime from the local secret catalog, not from SQLite, audit records, or provider payloads."
+        after_help = "Output contract:\n  text (default): when Plankton both allows the request and resolves the value, stdout prints only the raw value.\n  json: prints a minimal envelope for scripts and tooling.\n  deny, pending, or resolver errors: stdout stays empty and the error or status is reported on stderr. Deny output includes the recorded reason when one is available.\n\nValue source:\n  Values are resolved at runtime from the local secret catalog, not from SQLite, audit records, or provider payloads."
     )]
     Get(GetArgs),
     #[command(
@@ -572,10 +572,7 @@ fn handle_get_result(output: OutputFormat, result: &RequestQueryResult) -> Resul
             output,
             &result.request,
             GetDecision::Deny,
-            format!(
-                "request {} was denied for resource {}",
-                result.request.id, result.request.context.resource
-            ),
+            build_get_deny_error_message(result),
         ),
         None => handle_get_failure(
             output,
@@ -601,6 +598,48 @@ fn handle_get_failure(
             print_json_output(&build_get_error_output(request, decision, error))?;
             Ok(ExitCode::FAILURE)
         }
+    }
+}
+
+fn build_get_deny_error_message(result: &RequestQueryResult) -> String {
+    let prefix = format!(
+        "request {} was denied for resource {}",
+        result.request.id, result.request.context.resource
+    );
+
+    match extract_deny_reason(result) {
+        Some(reason) => format!("{prefix}: {reason}"),
+        None => prefix,
+    }
+}
+
+fn extract_deny_reason(result: &RequestQueryResult) -> Option<String> {
+    result
+        .audit_records
+        .iter()
+        .rev()
+        .find_map(extract_deny_reason_from_record)
+}
+
+fn extract_deny_reason_from_record(record: &AuditRecord) -> Option<String> {
+    let note = record.note.as_deref()?.trim();
+    if note.is_empty() {
+        return None;
+    }
+
+    match record.action {
+        AuditAction::ApprovalRecorded | AuditAction::HumanDecisionOverrodeLlm => {
+            payload_string(&record.payload, "decision")
+                .filter(|decision| decision == "deny")
+                .map(|_| note.to_string())
+        }
+        AuditAction::AutomaticDecisionRecorded => {
+            payload_string(&record.payload, "auto_disposition")
+                .or_else(|| payload_string(&record.payload, "decision"))
+                .filter(|decision| decision == "deny")
+                .map(|_| note.to_string())
+        }
+        _ => None,
     }
 }
 
@@ -2005,6 +2044,121 @@ mod tests {
         );
         assert!(serialized.get("value").is_none());
         assert!(serialized.get("resolver_kind").is_none());
+    }
+
+    #[test]
+    fn deny_error_message_includes_reason_when_decision_note_exists() {
+        let mut request = AccessRequest::new_pending(
+            RequestContext::new(
+                "secret/demo".to_string(),
+                "Need demo value".to_string(),
+                "alice".to_string(),
+            ),
+            PolicyMode::ManualOnly,
+            None,
+            "rendered prompt".to_string(),
+            None,
+            None,
+        );
+        let audits = request
+            .apply_manual_decision(
+                Decision::Deny,
+                "reviewer",
+                Some("outside the approved maintenance window".to_string()),
+            )
+            .expect("manual deny should succeed");
+        let result = RequestQueryResult {
+            request,
+            audit_records: audits,
+        };
+
+        let message = build_get_deny_error_message(&result);
+
+        assert_eq!(
+            message,
+            format!(
+                "request {} was denied for resource secret/demo: outside the approved maintenance window",
+                result.request.id
+            )
+        );
+    }
+
+    #[test]
+    fn deny_error_message_stays_compact_without_decision_reason() {
+        let mut request = AccessRequest::new_pending(
+            RequestContext::new(
+                "secret/demo".to_string(),
+                "Need demo value".to_string(),
+                "alice".to_string(),
+            ),
+            PolicyMode::ManualOnly,
+            None,
+            "rendered prompt".to_string(),
+            None,
+            None,
+        );
+        let audits = request
+            .apply_manual_decision(Decision::Deny, "reviewer", None)
+            .expect("manual deny should succeed");
+        let result = RequestQueryResult {
+            request,
+            audit_records: audits,
+        };
+
+        let message = build_get_deny_error_message(&result);
+
+        assert_eq!(
+            message,
+            format!(
+                "request {} was denied for resource secret/demo",
+                result.request.id
+            )
+        );
+    }
+
+    #[test]
+    fn deny_failure_json_error_includes_reason_when_present() {
+        let mut request = AccessRequest::new_pending(
+            RequestContext::new(
+                "secret/demo".to_string(),
+                "Need demo value".to_string(),
+                "alice".to_string(),
+            ),
+            PolicyMode::ManualOnly,
+            None,
+            "rendered prompt".to_string(),
+            None,
+            None,
+        );
+        let audits = request
+            .apply_manual_decision(
+                Decision::Deny,
+                "reviewer",
+                Some("change request was not approved".to_string()),
+            )
+            .expect("manual deny should succeed");
+        let result = RequestQueryResult {
+            request,
+            audit_records: audits,
+        };
+
+        let output = build_get_error_output(
+            &result.request,
+            GetDecision::Deny,
+            build_get_deny_error_message(&result),
+        );
+        let serialized =
+            serde_json::to_value(&output).expect("get error output should serialize to JSON");
+
+        assert_eq!(serialized["decision"], "deny");
+        assert_eq!(
+            serialized["error"],
+            format!(
+                "request {} was denied for resource secret/demo: change request was not approved",
+                result.request.id
+            )
+        );
+        assert!(serialized.get("value").is_none());
     }
 
     #[test]

@@ -122,6 +122,7 @@ Expected result:
 - if you run the same command with `--output json`, the result is a minimal `get` envelope rather than a full request or audit dump
 - the resolved value comes from the local secret catalog runtime resolver, not from SQLite, audit records, or provider payloads
 - `deny`, `pending`, or resolver errors keep `stdout` empty and report status or errors separately
+- when a deny decision carries a reason or note, the CLI appends that reason to the deny error; otherwise the deny output stays concise
 
 ### 4. Approve or reject in the desktop UI when review is required
 
@@ -149,6 +150,7 @@ Expected result after approval:
 Expected result after rejection:
 
 - the terminal keeps `stdout` empty and reports the failure on `stderr`
+- if the rejection recorded a reason or note, the deny output includes it; otherwise it stays as a concise denied message
 - the desktop request audit shows the submission event and the rejection event
 
 ## Evidence checker should capture

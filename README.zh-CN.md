@@ -74,7 +74,7 @@ plankton get secret/api-token \
 
 这个 value 会在运行时从本地 secret catalog 解析，不会从 SQLite、audit 记录或 provider payload 中读回。如果你的环境使用显式 catalog 文件，请先把它指给 Plankton（例如 `PLANKTON_SECRET_FILE=/abs/path/...`）。
 
-如果这次请求不能自动完成，Plankton 会把流程交给桌面 UI。人工审批、建议查看和审计查看都在 UI 中完成。非成功路径保持 `stdout` 为空，状态或错误会单独输出。
+如果这次请求不能自动完成，Plankton 会把流程交给桌面 UI。人工审批、建议查看和审计查看都在 UI 中完成。非成功路径保持 `stdout` 为空，状态或错误会单独输出。若一次 deny 记录里带有原因或备注，Plankton 会把该原因追加到 deny 错误里；如果没有记录原因，则继续保持简洁的 denied 提示。
 
 如果你当前是在源码仓库里做本地开发，而不是使用 cask 安装，可以把同样的命令换成 `cargo run -p plankton -- ...`。
 
