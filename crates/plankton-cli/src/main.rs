@@ -15,8 +15,8 @@ use plankton_core::{
     collect_runtime_call_chain, default_value_resolver, derive_script_path, load_settings,
     prompt_call_chain_paths, AccessRequest, ApprovalStatus, AuditAction, AuditRecord,
     AutomaticDecisionSource, AutomaticDecisionTrace, AutomaticDisposition, Decision, LlmSuggestion,
-    LlmSuggestionUsage, PolicyMode, ProviderTrace, RequestContext, SuggestedDecision,
-    ValueResolver, ValueResolverError,
+    LlmSuggestionUsage, PlanktonSettings, PolicyMode, ProviderTrace, RequestContext,
+    SuggestedDecision, ValueResolver, ValueResolverError,
 };
 use plankton_store::{AccessibleResourceRecord, RequestQueryResult, SqliteStore};
 use serde::Serialize;
@@ -124,10 +124,9 @@ struct GetArgs {
     #[arg(
         long,
         value_enum,
-        default_value_t = CliPolicyMode::ManualOnly,
-        help = "Choose Human Review, assisted review with an LLM suggestion, or fully automatic LLM disposition"
+        help = "Choose Human Review, assisted review with an LLM suggestion, or fully automatic LLM disposition. When omitted, Plankton uses the configured default policy mode from settings."
     )]
-    policy_mode: CliPolicyMode,
+    policy_mode: Option<CliPolicyMode>,
 }
 
 #[derive(Debug, Args)]
@@ -421,7 +420,11 @@ async fn run() -> Result<ExitCode> {
             context.metadata = parse_key_values("metadata", metadata)?;
 
             let request = store
-                .submit_request(&settings, context, policy_mode.into())
+                .submit_request(
+                    &settings,
+                    context,
+                    resolve_requested_policy_mode(policy_mode, &settings),
+                )
                 .await
                 .context("failed to submit access request")?;
             maybe_trigger_desktop_handoff(&request)?;
@@ -480,6 +483,15 @@ fn default_actor() -> String {
     env::var("USER")
         .or_else(|_| env::var("USERNAME"))
         .unwrap_or_else(|_| "unknown".to_string())
+}
+
+fn resolve_requested_policy_mode(
+    requested: Option<CliPolicyMode>,
+    settings: &PlanktonSettings,
+) -> PolicyMode {
+    requested
+        .map(PolicyMode::from)
+        .unwrap_or(settings.default_policy_mode)
 }
 
 fn print_output<T>(
@@ -583,6 +595,21 @@ fn handle_get_result(output: OutputFormat, result: &RequestQueryResult) -> Resul
     }
 }
 
+fn handle_get_failure(
+    output: OutputFormat,
+    request: &AccessRequest,
+    decision: GetDecision,
+    error: String,
+) -> Result<ExitCode> {
+    match output {
+        OutputFormat::Text => bail!(error),
+        OutputFormat::Json => {
+            print_json_output(&build_get_error_output(request, decision, error))?;
+            Ok(ExitCode::FAILURE)
+        }
+    }
+}
+
 fn build_get_resolver_bootstrap_error(
     request: &AccessRequest,
     error: &ValueResolverError,
@@ -609,21 +636,6 @@ fn build_get_resolver_bootstrap_error(
             request.context.resource
         ),
         _ => format!("{prefix}: {error}"),
-    }
-}
-
-fn handle_get_failure(
-    output: OutputFormat,
-    request: &AccessRequest,
-    decision: GetDecision,
-    error: String,
-) -> Result<ExitCode> {
-    match output {
-        OutputFormat::Text => bail!(error),
-        OutputFormat::Json => {
-            print_json_output(&build_get_error_output(request, decision, error))?;
-            Ok(ExitCode::FAILURE)
-        }
     }
 }
 
@@ -1893,7 +1905,7 @@ mod tests {
                 assert_eq!(args.resource.as_deref(), Some("secret/api-token"));
                 assert_eq!(args.requested_by, Some("alice".to_string()));
                 assert_eq!(args.metadata, vec!["environment=dev".to_string()]);
-                assert_eq!(args.policy_mode, CliPolicyMode::ManualOnly);
+                assert_eq!(args.policy_mode, None);
             }
             _ => panic!("expected get command"),
         }
@@ -1915,7 +1927,7 @@ mod tests {
             Commands::Get(args) => {
                 assert_eq!(args.resource_flag.as_deref(), Some("secret/api-token"));
                 assert_eq!(args.reason, "Need smoke test access");
-                assert_eq!(args.policy_mode, CliPolicyMode::ManualOnly);
+                assert_eq!(args.policy_mode, None);
             }
             _ => panic!("expected get command"),
         }
@@ -1936,7 +1948,7 @@ mod tests {
 
         match cli.command {
             Commands::Get(args) => {
-                assert_eq!(args.policy_mode, CliPolicyMode::Assisted);
+                assert_eq!(args.policy_mode, Some(CliPolicyMode::Assisted));
             }
             _ => panic!("expected get command"),
         }
@@ -1957,7 +1969,7 @@ mod tests {
 
         match cli.command {
             Commands::Get(args) => {
-                assert_eq!(args.policy_mode, CliPolicyMode::Auto);
+                assert_eq!(args.policy_mode, Some(CliPolicyMode::Auto));
             }
             _ => panic!("expected get command"),
         }
@@ -1978,10 +1990,25 @@ mod tests {
 
         match cli.command {
             Commands::Get(args) => {
-                assert_eq!(args.policy_mode, CliPolicyMode::ManualOnly);
+                assert_eq!(args.policy_mode, Some(CliPolicyMode::ManualOnly));
             }
             _ => panic!("expected get command"),
         }
+    }
+
+    #[test]
+    fn resolves_policy_mode_from_settings_when_flag_is_omitted() {
+        let mut settings = load_settings().expect("default settings should load");
+        settings.default_policy_mode = PolicyMode::LlmAutomatic;
+
+        assert_eq!(
+            resolve_requested_policy_mode(None, &settings),
+            PolicyMode::LlmAutomatic
+        );
+        assert_eq!(
+            resolve_requested_policy_mode(Some(CliPolicyMode::Assisted), &settings),
+            PolicyMode::Assisted
+        );
     }
 
     #[test]
@@ -2306,7 +2333,9 @@ mod tests {
             .to_string();
 
         assert!(get_help.contains("Choose Human Review"));
-        assert!(get_help.contains("[default: human-review]"));
+        assert!(get_help.contains(
+            "When omitted, Plankton uses the configured default policy mode from settings."
+        ));
         assert!(get_help.contains("[possible values: human-review, auto, assisted]"));
         assert!(!get_help.contains("manual-only"));
     }

@@ -26,6 +26,7 @@ pub use call_chain::{
 pub use config::{
     load_settings, save_user_default_policy_mode, save_user_settings, user_settings_path,
     PlanktonSettings, SettingsError, SettingsPersistError, UserSettings,
+    DEFAULT_USER_PROVIDER_KIND,
 };
 pub use domain::{
     AccessRequest, ApprovalStatus, AuditAction, AuditRecord, DashboardData, Decision, DomainError,

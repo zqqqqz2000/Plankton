@@ -9,6 +9,7 @@ use plankton_core::{
     sanitize_request_context_for_storage, secret_exposure_risk, AccessRequest, AuditRecord,
     AutomaticDecisionTrace, DashboardData, Decision, DomainError, LlmSuggestion, PlanktonSettings,
     PolicyMode, ProviderError, ProviderInputSnapshot, RequestContext, TemplateError,
+    DEFAULT_USER_PROVIDER_KIND,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -411,7 +412,7 @@ fn option_json_string<T: serde::Serialize>(
 fn normalized_provider_kind(settings: &PlanktonSettings) -> String {
     let provider_kind = settings.provider_kind.trim().to_ascii_lowercase();
     if provider_kind.is_empty() {
-        "mock".to_string()
+        DEFAULT_USER_PROVIDER_KIND.to_string()
     } else {
         provider_kind
     }

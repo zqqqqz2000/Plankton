@@ -13,6 +13,8 @@ use crate::template::{
 };
 use crate::PolicyMode;
 
+pub const DEFAULT_USER_PROVIDER_KIND: &str = "acp_codex";
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PlanktonSettings {
     pub database_url: String,
@@ -63,7 +65,7 @@ impl Default for PlanktonSettings {
         Self {
             database_url: default_database_url(),
             default_policy_mode: PolicyMode::ManualOnly,
-            provider_kind: "mock".to_string(),
+            provider_kind: DEFAULT_USER_PROVIDER_KIND.to_string(),
             request_template: DEFAULT_REQUEST_TEMPLATE.to_string(),
             llm_advice_template: DEFAULT_LLM_ADVICE_TEMPLATE.to_string(),
             llm_advice_system_prompt: DEFAULT_LLM_SYSTEM_PROMPT.to_string(),
@@ -209,6 +211,7 @@ fn load_settings_from_path(
 
     let mut settings: PlanktonSettings = config.try_deserialize()?;
     apply_env_overrides(&mut settings);
+    normalize_user_provider_kind(&mut settings);
 
     Ok(settings)
 }
@@ -374,6 +377,22 @@ fn apply_env_overrides(settings: &mut PlanktonSettings) {
     }
 }
 
+fn normalize_user_provider_kind(settings: &mut PlanktonSettings) {
+    if std::env::var("PLANKTON_PROVIDER_KIND")
+        .ok()
+        .is_some_and(|value| !value.trim().is_empty())
+    {
+        return;
+    }
+
+    let normalized = settings.provider_kind.trim().to_ascii_lowercase();
+    if normalized.is_empty() || normalized == "mock" {
+        settings.provider_kind = DEFAULT_USER_PROVIDER_KIND.to_string();
+    } else {
+        settings.provider_kind = normalized;
+    }
+}
+
 fn save_user_default_policy_mode_to_path(
     path: &Path,
     policy_mode: PolicyMode,
@@ -508,6 +527,13 @@ fn validate_user_settings(settings: &UserSettings) -> Result<(), SettingsPersist
         });
     }
 
+    if settings.provider_kind.eq_ignore_ascii_case("mock") {
+        return Err(SettingsPersistError::InvalidField {
+            field: "provider_kind",
+            reason: "mock is reserved for internal testing and is not a user-facing provider",
+        });
+    }
+
     validate_non_negative_float("openai_temperature", settings.openai_temperature)?;
     validate_non_negative_float("claude_temperature", settings.claude_temperature)?;
 
@@ -569,7 +595,7 @@ fn policy_mode_to_string(value: PolicyMode) -> String {
 mod tests {
     use super::{
         load_settings_from_path, save_user_default_policy_mode_to_path, save_user_settings_to_path,
-        PolicyMode, SettingsPersistError, UserSettings,
+        PolicyMode, SettingsPersistError, UserSettings, DEFAULT_USER_PROVIDER_KIND,
     };
 
     fn temp_settings_path(test_name: &str) -> std::path::PathBuf {
@@ -661,7 +687,8 @@ mod tests {
         let path = temp_settings_path("legacy-policy-mode");
         std::fs::create_dir_all(path.parent().expect("temp parent should exist"))
             .expect("temp parent should be created");
-        std::fs::write(&path, "provider_kind = \"mock\"\n").expect("seed settings should exist");
+        std::fs::write(&path, "provider_kind = \"acp_codex\"\n")
+            .expect("seed settings should exist");
 
         save_user_default_policy_mode_to_path(&path, PolicyMode::Assisted)
             .expect("policy mode should persist");
@@ -669,7 +696,7 @@ mod tests {
             load_settings_from_path(&path, false).expect("settings should load from custom path");
 
         assert_eq!(loaded.default_policy_mode, PolicyMode::Assisted);
-        assert_eq!(loaded.provider_kind, "mock");
+        assert_eq!(loaded.provider_kind, "acp_codex");
 
         let _ = std::fs::remove_file(&path);
     }
@@ -690,5 +717,39 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn rejects_mock_provider_kind_for_user_settings() {
+        let path = temp_settings_path("reject-mock-provider-kind");
+        let mut settings = UserSettings::from(&super::PlanktonSettings::default());
+        settings.provider_kind = "mock".to_string();
+
+        let error = save_user_settings_to_path(&path, &settings)
+            .expect_err("mock should not be accepted as a user-facing provider");
+
+        assert!(matches!(
+            error,
+            SettingsPersistError::InvalidField {
+                field: "provider_kind",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn upgrades_legacy_mock_provider_setting_to_acp_codex_on_load() {
+        let path = temp_settings_path("upgrade-legacy-mock-provider");
+        std::fs::create_dir_all(path.parent().expect("temp parent should exist"))
+            .expect("temp parent should be created");
+        std::fs::write(&path, "provider_kind = \"mock\"\n")
+            .expect("legacy settings file should be written");
+
+        let loaded =
+            load_settings_from_path(&path, false).expect("settings should load from custom path");
+
+        assert_eq!(loaded.provider_kind, DEFAULT_USER_PROVIDER_KIND);
+
+        let _ = std::fs::remove_file(&path);
     }
 }
