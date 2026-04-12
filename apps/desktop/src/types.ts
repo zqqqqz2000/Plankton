@@ -1,9 +1,27 @@
+export type StructuredCallChainNode = {
+  pid?: number | null;
+  ppid?: number | null;
+  process_name?: string | null;
+  executable_path?: string | null;
+  argv?: string[] | null;
+  resolved_file_path?: string | null;
+  source?: string | null;
+  previewable?: boolean | null;
+  preview_status?: string | null;
+  preview_text?: string | null;
+  preview_error?: string | null;
+  // Legacy compatibility during rollout from pre-structured payloads.
+  path?: string | null;
+};
+
+export type CallChainEntry = string | StructuredCallChainNode;
+
 export type RequestContext = {
   resource: string;
   reason: string;
   requested_by: string;
   script_path: string | null;
-  call_chain: string[];
+  call_chain: CallChainEntry[];
   env_vars: Record<string, string>;
   metadata: Record<string, string>;
   created_at: string;
@@ -101,3 +119,22 @@ export type DashboardData = {
 };
 
 export type DecisionCommand = "approve_request" | "reject_request";
+
+export type DesktopSettings = {
+  default_policy_mode: string;
+  provider_kind: string;
+  openai_api_base: string;
+  openai_api_key: string;
+  openai_model: string;
+  openai_temperature: number;
+  claude_api_base: string;
+  claude_api_key: string;
+  claude_model: string;
+  claude_anthropic_version: string;
+  claude_max_tokens: number;
+  claude_temperature: number;
+  claude_timeout_secs: number;
+  acp_codex_program: string;
+  acp_codex_args: string;
+  acp_timeout_secs: number;
+};
