@@ -21,6 +21,8 @@ const SECRET_CATALOG_BOOTSTRAP_TEMPLATE: &str = r#"# Plankton local secret catal
 pub trait ValueResolver: Send + Sync {
     fn kind(&self) -> &'static str;
 
+    fn list_resources(&self) -> Vec<String>;
+
     fn resolve(&self, resource: &str) -> Result<String, ValueResolverError>;
 }
 
@@ -92,6 +94,10 @@ impl LocalSecretCatalogResolver {
 impl ValueResolver for LocalSecretCatalogResolver {
     fn kind(&self) -> &'static str {
         LOCAL_SECRET_CATALOG_RESOLVER_KIND
+    }
+
+    fn list_resources(&self) -> Vec<String> {
+        self.values.keys().cloned().collect()
     }
 
     fn resolve(&self, resource: &str) -> Result<String, ValueResolverError> {
@@ -238,6 +244,25 @@ mod tests {
                 .resolve("secret/demo")
                 .expect("value should resolve"),
             "demo-value"
+        );
+    }
+
+    #[test]
+    fn lists_resource_keys_from_catalog() {
+        let temp = tempdir().expect("temp directory should be created");
+        let path = temp.path().join("secrets.toml");
+        fs::write(
+            &path,
+            "[secrets]\n\"secret/z-token\" = \"z\"\n\"secret/a-token\" = \"a\"\n",
+        )
+        .expect("catalog should be written");
+
+        let resolver = LocalSecretCatalogResolver::load_from_path(path.as_path())
+            .expect("resolver should load");
+
+        assert_eq!(
+            resolver.list_resources(),
+            vec!["secret/a-token".to_string(), "secret/z-token".to_string()]
         );
     }
 

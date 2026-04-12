@@ -18,7 +18,7 @@ use plankton_core::{
     LlmSuggestionUsage, PlanktonSettings, PolicyMode, ProviderTrace, RequestContext,
     SuggestedDecision, ValueResolver, ValueResolverError,
 };
-use plankton_store::{AccessibleResourceRecord, RequestQueryResult, SqliteStore};
+use plankton_store::{RequestQueryResult, SqliteStore};
 use serde::Serialize;
 use serde_json::Value;
 use tokio::time::sleep;
@@ -80,10 +80,10 @@ enum Commands {
     )]
     Get(GetArgs),
     #[command(
-        about = "List resource identifiers currently available to the local LLM surface without revealing secret values"
+        about = "List resource identifiers currently available from the active resource catalog without revealing secret values"
     )]
     List(ListArgs),
-    #[command(about = "Fuzzy-search the same accessible resource identifier view used by `list`")]
+    #[command(about = "Fuzzy-search the same resource directory used by `list` and `get`")]
     Search(SearchArgs),
 }
 
@@ -295,18 +295,8 @@ struct GetOutputEnvelope {
 }
 
 #[derive(Debug, Clone, Serialize)]
-struct AccessibleResourceView {
-    resource: String,
-    granted_by_request_id: String,
-    policy_mode: PolicyMode,
-    provider_kind: Option<String>,
-    granted_at: chrono::DateTime<chrono::Utc>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-struct AccessibleResourceListOutputView {
-    resource_count: usize,
-    resources: Vec<AccessibleResourceView>,
+struct ResourceDirectoryOutputView {
+    resources: Vec<String>,
 }
 
 #[cfg(test)]
@@ -390,12 +380,12 @@ async fn main() -> ExitCode {
 async fn run() -> Result<ExitCode> {
     let Cli { output, command } = Cli::parse();
     let settings = load_settings().context("failed to load Plankton settings")?;
-    let store = SqliteStore::new(&settings)
-        .await
-        .context("failed to initialize SQLite store")?;
 
     match command {
         Commands::Get(args) => {
+            let store = SqliteStore::new(&settings)
+                .await
+                .context("failed to initialize SQLite store")?;
             let GetArgs {
                 resource,
                 resource_flag,
@@ -432,24 +422,18 @@ async fn run() -> Result<ExitCode> {
             return handle_get_result(output, &result);
         }
         Commands::List(_) => {
-            let resources = store
-                .list_accessible_resources()
-                .await
-                .context("failed to list accessible resource identifiers")?;
-            let list_output = build_accessible_resource_list_output(&resources);
-            print_output(output, &list_output, || {
-                render_accessible_resource_list_text(&resources)
+            let resources = load_active_resource_directory()?;
+            let directory_output = build_resource_directory_output(&resources);
+            print_output(output, &directory_output, || {
+                render_resource_directory_text(&resources)
             })?;
         }
         Commands::Search(args) => {
-            let resources = store
-                .list_accessible_resources()
-                .await
-                .context("failed to load accessible resource identifiers for search")?;
-            let filtered = filter_accessible_resources(&resources, &args.query);
-            let list_output = build_accessible_resource_list_output(&filtered);
-            print_output(output, &list_output, || {
-                render_accessible_resource_list_text(&filtered)
+            let resources = load_active_resource_directory()?;
+            let filtered = filter_resource_directory(&resources, &args.query);
+            let directory_output = build_resource_directory_output(&filtered);
+            print_output(output, &directory_output, || {
+                render_resource_directory_text(&filtered)
             })?;
         }
     }
@@ -522,6 +506,12 @@ where
         serde_json::to_string_pretty(value).context("failed to serialize CLI output")?
     );
     Ok(())
+}
+
+fn load_active_resource_directory() -> Result<Vec<String>> {
+    let resolver =
+        default_value_resolver().context("failed to load the active resource directory")?;
+    Ok(resolver.list_resources())
 }
 
 fn print_raw_value(value: &str) -> Result<()> {
@@ -711,14 +701,11 @@ fn build_get_error_output(
     }
 }
 
-fn filter_accessible_resources(
-    resources: &[AccessibleResourceRecord],
-    query: &str,
-) -> Vec<AccessibleResourceRecord> {
+fn filter_resource_directory(resources: &[String], query: &str) -> Vec<String> {
     let query = query.trim().to_ascii_lowercase();
     resources
         .iter()
-        .filter(|resource| resource.resource.to_ascii_lowercase().contains(&query))
+        .filter(|resource| resource.to_ascii_lowercase().contains(&query))
         .cloned()
         .collect()
 }
@@ -924,21 +911,9 @@ fn build_status_output(result: &RequestQueryResult) -> StatusOutputView {
     }
 }
 
-fn build_accessible_resource_list_output(
-    resources: &[AccessibleResourceRecord],
-) -> AccessibleResourceListOutputView {
-    AccessibleResourceListOutputView {
-        resource_count: resources.len(),
-        resources: resources
-            .iter()
-            .map(|resource| AccessibleResourceView {
-                resource: resource.resource.clone(),
-                granted_by_request_id: resource.granted_by_request_id.clone(),
-                policy_mode: resource.policy_mode,
-                provider_kind: resource.provider_kind.clone(),
-                granted_at: resource.granted_at,
-            })
-            .collect(),
+fn build_resource_directory_output(resources: &[String]) -> ResourceDirectoryOutputView {
+    ResourceDirectoryOutputView {
+        resources: resources.to_vec(),
     }
 }
 
@@ -1125,32 +1100,8 @@ fn render_status_text(result: &RequestQueryResult) -> String {
     lines.join("\n")
 }
 
-fn render_accessible_resource_list_text(resources: &[AccessibleResourceRecord]) -> String {
-    if resources.is_empty() {
-        return "resource_count: 0".to_string();
-    }
-
-    let entries = resources
-        .iter()
-        .enumerate()
-        .map(|(index, resource)| {
-            [
-                format!("[{}]", index + 1),
-                format!("resource: {}", resource.resource),
-                format!("granted_by_request_id: {}", resource.granted_by_request_id),
-                format!("policy_mode: {}", enum_label(&resource.policy_mode)),
-                format!(
-                    "provider_kind: {}",
-                    optional_str(resource.provider_kind.as_deref())
-                ),
-                format!("granted_at: {}", resource.granted_at.to_rfc3339()),
-            ]
-            .join("\n")
-        })
-        .collect::<Vec<_>>()
-        .join("\n\n");
-
-    format!("resource_count: {}\n\n{}", resources.len(), entries)
+fn render_resource_directory_text(resources: &[String]) -> String {
+    resources.join("\n")
 }
 
 #[cfg(test)]
@@ -2890,48 +2841,29 @@ mod tests {
 
     #[test]
     fn renders_accessible_resource_list_as_identifiers_only() {
-        let resources = vec![AccessibleResourceRecord {
-            resource: "secret/dev-token".to_string(),
-            granted_by_request_id: "req-123".to_string(),
-            policy_mode: PolicyMode::Assisted,
-            provider_kind: Some("mock".to_string()),
-            granted_at: chrono::Utc::now(),
-        }];
+        let resources = vec!["secret/dev-token".to_string()];
 
-        let rendered = render_accessible_resource_list_text(&resources);
-        let output = build_accessible_resource_list_output(&resources);
+        let rendered = render_resource_directory_text(&resources);
+        let output = build_resource_directory_output(&resources);
 
-        assert!(rendered.contains("resource: secret/dev-token"));
-        assert!(rendered.contains("granted_by_request_id: req-123"));
-        assert!(rendered.contains("policy_mode: assisted"));
+        assert_eq!(rendered, "secret/dev-token");
+        assert!(!rendered.contains("granted_by_request_id"));
+        assert!(!rendered.contains("policy_mode"));
         assert!(!rendered.contains("secret_value"));
-        assert_eq!(output.resource_count, 1);
-        assert_eq!(output.resources[0].resource, "secret/dev-token");
+        assert_eq!(output.resources, vec!["secret/dev-token".to_string()]);
     }
 
     #[test]
     fn filters_accessible_resources_by_case_insensitive_resource_substring() {
         let resources = vec![
-            AccessibleResourceRecord {
-                resource: "secret/dev-token".to_string(),
-                granted_by_request_id: "req-123".to_string(),
-                policy_mode: PolicyMode::Assisted,
-                provider_kind: Some("mock".to_string()),
-                granted_at: chrono::Utc::now(),
-            },
-            AccessibleResourceRecord {
-                resource: "config/prod-readonly".to_string(),
-                granted_by_request_id: "req-456".to_string(),
-                policy_mode: PolicyMode::ManualOnly,
-                provider_kind: None,
-                granted_at: chrono::Utc::now(),
-            },
+            "secret/dev-token".to_string(),
+            "config/prod-readonly".to_string(),
         ];
 
-        let filtered = filter_accessible_resources(&resources, "DEV");
+        let filtered = filter_resource_directory(&resources, "DEV");
 
         assert_eq!(filtered.len(), 1);
-        assert_eq!(filtered[0].resource, "secret/dev-token");
+        assert_eq!(filtered[0], "secret/dev-token");
     }
 
     #[test]
