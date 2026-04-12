@@ -16,6 +16,7 @@ import {
   type SuggestionSummaryView,
   type SuggestionTraceView,
 } from "./dashboardModel";
+import { buildAcpProgramSummary } from "./acpSettings";
 import { getPreviewHighlightResult } from "./codePreview";
 import { formatElapsed, formatShortId, formatTimestamp } from "./formatters";
 import {
@@ -2100,6 +2101,9 @@ function renderSettingsModal(): string {
     "manual_only";
   const currentProviderKind =
     state.settingsDraft?.provider_kind ?? state.settings?.provider_kind ?? null;
+  const acpSummary = buildAcpProgramSummary(
+    state.settingsDraft ?? state.settings,
+  );
   const canSaveSettings =
     state.settings !== null &&
     state.settingsDraft !== null &&
@@ -2374,6 +2378,30 @@ function renderSettingsModal(): string {
               <span>${escapeHtml(label("acp_codex"))}</span>
             </div>
             <p class="section-copy">${escapeHtml(text("providerAcpDesc"))}</p>
+            <div class="settings-placeholder" data-testid="settings-acp-summary">
+              <dl class="facts">
+                <div data-testid="settings-acp-default-starter">
+                  <dt>${escapeHtml(text("acpDefaultStarter"))}</dt>
+                  <dd>${escapeHtml(acpSummary.defaultCommand)}</dd>
+                </div>
+                <div data-testid="settings-acp-current-program">
+                  <dt>${escapeHtml(text("acpCurrentProgram"))}</dt>
+                  <dd>${escapeHtml(acpSummary.currentProgram)}</dd>
+                </div>
+                <div data-testid="settings-acp-current-args">
+                  <dt>${escapeHtml(text("acpCurrentArgs"))}</dt>
+                  <dd>${escapeHtml(acpSummary.currentArgs)}</dd>
+                </div>
+                <div data-testid="settings-acp-client-mode">
+                  <dt>${escapeHtml(text("acpClientMode"))}</dt>
+                  <dd>${escapeHtml(
+                    acpSummary.usesDefaultStarter
+                      ? text("acpUsesDefaultStarter")
+                      : text("acpUsesCustomClient"),
+                  )}</dd>
+                </div>
+              </dl>
+            </div>
             <div class="settings-form-grid">
               ${renderSettingsInput({
                 field: "acp_codex_program",

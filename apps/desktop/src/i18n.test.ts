@@ -15,4 +15,9 @@ describe("i18n", () => {
     expect(translateCode("en", "manual_only")).toBe("Human Review");
     expect(translateCode("zh-CN", "manual_only")).toBe("人工审批");
   });
+
+  it("treats acp_codex as ACP in user-facing labels", () => {
+    expect(translateCode("en", "acp_codex")).toBe("ACP");
+    expect(translateCode("zh-CN", "acp_codex")).toBe("ACP");
+  });
 });

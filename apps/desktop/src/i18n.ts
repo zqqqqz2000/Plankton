@@ -43,10 +43,10 @@ const MESSAGES = {
     settingsProviderHelp:
       "Select which provider path the desktop should use for new AI-assisted or automatic requests.",
     settingsProviderInternalHelp:
-      "Mock stays internal-only and is no longer offered as a normal user provider.",
+      "Only user-facing providers are shown here. Internal test providers stay hidden.",
     settingsOpenAiTitle: "OpenAI Compatible",
     settingsClaudeTitle: "Claude",
-    settingsAcpTitle: "ACP Codex",
+    settingsAcpTitle: "ACP",
     settingsCurrentProvider: "Current Provider",
     settingsSavedSuccess: "Desktop settings saved",
     settingsEnvOverrideHelp:
@@ -66,7 +66,7 @@ const MESSAGES = {
     providerClaudeDesc:
       "Use Anthropic Messages with model, API version, max tokens, temperature, and timeout controls.",
     providerAcpDesc:
-      "Use a local ACP Codex process with program, args, and timeout controls.",
+      "Use the ACP protocol provider. Codex is only the default starter command, and you can replace it with another ACP-compatible client.",
     providerMockDesc:
       "Use the local mock provider for development or isolated smoke testing.",
     openAiBase: "Base URL",
@@ -83,6 +83,12 @@ const MESSAGES = {
     acpProgram: "Program",
     acpArgs: "Arguments",
     acpTimeout: "Timeout (secs)",
+    acpDefaultStarter: "Default Starter",
+    acpCurrentProgram: "Current Program",
+    acpCurrentArgs: "Current Arguments",
+    acpClientMode: "Client",
+    acpUsesDefaultStarter: "Using the default Codex starter",
+    acpUsesCustomClient: "Using a custom ACP client",
     eventCount: "{count} event(s)",
     context: "Context",
     script: "Script",
@@ -204,10 +210,10 @@ const MESSAGES = {
     settingsProviderHelp:
       "选择桌面端处理 AI 辅助或自动决策请求时使用的 provider 路径。",
     settingsProviderInternalHelp:
-      "Mock 只保留内部测试使用，不再作为正常用户可选 provider 暴露。",
+      "这里只显示面向用户的 provider。内部测试 provider 不会暴露在设置页。",
     settingsOpenAiTitle: "OpenAI 兼容",
     settingsClaudeTitle: "Claude",
-    settingsAcpTitle: "ACP Codex",
+    settingsAcpTitle: "ACP",
     settingsCurrentProvider: "当前 Provider",
     settingsSavedSuccess: "桌面设置已保存",
     settingsEnvOverrideHelp:
@@ -223,7 +229,7 @@ const MESSAGES = {
     providerClaudeDesc:
       "使用 Anthropic Messages，可配置 model、API version、max tokens、temperature 与 timeout。",
     providerAcpDesc:
-      "使用本地 ACP Codex 进程，可配置 program、args 与 timeout。",
+      "使用 ACP 协议 provider。Codex 只是默认 starter 命令，你可以替换成其它兼容 ACP 的 client。",
     providerMockDesc: "使用本地 mock provider，适合开发和隔离 smoke test。",
     openAiBase: "Base URL",
     openAiApiKey: "API Key",
@@ -239,6 +245,12 @@ const MESSAGES = {
     acpProgram: "程序",
     acpArgs: "参数",
     acpTimeout: "超时（秒）",
+    acpDefaultStarter: "默认 Starter",
+    acpCurrentProgram: "当前程序",
+    acpCurrentArgs: "当前参数",
+    acpClientMode: "当前客户端",
+    acpUsesDefaultStarter: "当前使用默认 Codex starter",
+    acpUsesCustomClient: "当前使用自定义 ACP client",
     eventCount: "{count} 条事件",
     context: "上下文",
     script: "脚本",
@@ -342,7 +354,7 @@ const CODE_LABELS: Record<Locale, Record<string, string>> = {
     automatic_decision_recorded: "Automatic Decision Recorded",
     automatic_escalated_to_human: "Escalated to Human Review",
     approval_recorded: "Approval Recorded",
-    acp_codex: "ACP Codex",
+    acp_codex: "ACP",
     openai_compatible: "OpenAI Compatible",
     claude: "Claude",
     mock: "Internal Mock",
@@ -372,7 +384,7 @@ const CODE_LABELS: Record<Locale, Record<string, string>> = {
     automatic_decision_recorded: "自动决策已记录",
     automatic_escalated_to_human: "已转人工审批",
     approval_recorded: "审批已记录",
-    acp_codex: "ACP Codex",
+    acp_codex: "ACP",
     openai_compatible: "OpenAI 兼容",
     claude: "Claude",
     mock: "内部 Mock",
