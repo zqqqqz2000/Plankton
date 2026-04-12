@@ -16,7 +16,7 @@ use plankton_core::{
     prompt_call_chain_paths, AccessRequest, ApprovalStatus, AuditAction, AuditRecord,
     AutomaticDecisionSource, AutomaticDecisionTrace, AutomaticDisposition, Decision, LlmSuggestion,
     LlmSuggestionUsage, PolicyMode, ProviderTrace, RequestContext, SuggestedDecision,
-    ValueResolver,
+    ValueResolver, ValueResolverError,
 };
 use plankton_store::{AccessibleResourceRecord, RequestQueryResult, SqliteStore};
 use serde::Serialize;
@@ -534,10 +534,7 @@ fn handle_get_result(output: OutputFormat, result: &RequestQueryResult) -> Resul
                         output,
                         &result.request,
                         GetDecision::Allow,
-                        format!(
-                            "request {} was allowed for resource {} but the value resolver could not be initialized: {}",
-                            result.request.id, result.request.context.resource, error
-                        ),
+                        build_get_resolver_bootstrap_error(&result.request, &error),
                     );
                 }
             };
@@ -583,6 +580,35 @@ fn handle_get_result(output: OutputFormat, result: &RequestQueryResult) -> Resul
                 result.request.id, result.request.context.resource
             ),
         ),
+    }
+}
+
+fn build_get_resolver_bootstrap_error(
+    request: &AccessRequest,
+    error: &ValueResolverError,
+) -> String {
+    let prefix = format!(
+        "request {} was allowed for resource {} but Plankton could not return the value",
+        request.id, request.context.resource
+    );
+
+    match error {
+        ValueResolverError::CatalogBootstrapRequired { path, created } => {
+            let bootstrap_action = if *created {
+                format!("a starter local secret catalog was created at {path}")
+            } else {
+                format!("set up the local secret catalog at {path}")
+            };
+            format!(
+                "{prefix}: {bootstrap_action}; add an entry like [secrets] \"{}\" = \"<value>\" and run `plankton get` again",
+                request.context.resource
+            )
+        }
+        ValueResolverError::CatalogMissing { path } => format!(
+            "{prefix}: set up the local secret catalog at {path}; add an entry like [secrets] \"{}\" = \"<value>\" and run `plankton get` again",
+            request.context.resource
+        ),
+        _ => format!("{prefix}: {error}"),
     }
 }
 
@@ -2044,6 +2070,63 @@ mod tests {
         );
         assert!(serialized.get("value").is_none());
         assert!(serialized.get("resolver_kind").is_none());
+    }
+
+    #[test]
+    fn resolver_bootstrap_error_guides_user_to_local_catalog() {
+        let request = AccessRequest::new_pending(
+            RequestContext::new(
+                "secret/demo".to_string(),
+                "Need demo value".to_string(),
+                "alice".to_string(),
+            ),
+            PolicyMode::LlmAutomatic,
+            Some("mock".to_string()),
+            "rendered prompt".to_string(),
+            None,
+            None,
+        );
+
+        let message = build_get_resolver_bootstrap_error(
+            &request,
+            &ValueResolverError::CatalogBootstrapRequired {
+                path: "/tmp/plankton-secrets.toml".to_string(),
+                created: true,
+            },
+        );
+
+        assert!(message.contains("Plankton could not return the value"));
+        assert!(message
+            .contains("a starter local secret catalog was created at /tmp/plankton-secrets.toml"));
+        assert!(message.contains("[secrets] \"secret/demo\" = \"<value>\""));
+        assert!(!message.contains("could not be initialized"));
+    }
+
+    #[test]
+    fn resolver_missing_catalog_error_uses_setup_language() {
+        let request = AccessRequest::new_pending(
+            RequestContext::new(
+                "secret/demo".to_string(),
+                "Need demo value".to_string(),
+                "alice".to_string(),
+            ),
+            PolicyMode::LlmAutomatic,
+            Some("mock".to_string()),
+            "rendered prompt".to_string(),
+            None,
+            None,
+        );
+
+        let message = build_get_resolver_bootstrap_error(
+            &request,
+            &ValueResolverError::CatalogMissing {
+                path: "/tmp/plankton-secrets.toml".to_string(),
+            },
+        );
+
+        assert!(message.contains("set up the local secret catalog at /tmp/plankton-secrets.toml"));
+        assert!(message.contains("run `plankton get` again"));
+        assert!(!message.contains("value resolver could not be initialized"));
     }
 
     #[test]

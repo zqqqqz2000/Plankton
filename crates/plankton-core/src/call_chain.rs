@@ -333,10 +333,10 @@ fn infer_script_path(
 
     match interpreter {
         Some("bash") | Some("sh") | Some("zsh") | Some("fish") => {
-            return find_first_positional_path(argv.iter().skip(1), cwd);
+            return infer_shell_script_path(argv, cwd);
         }
         Some("python") | Some("python3") | Some("pythonw") => {
-            return find_first_positional_path(argv.iter().skip(1), cwd);
+            return infer_python_script_path(argv, cwd);
         }
         Some("pwsh") | Some("powershell") | Some("powershell.exe") | Some("pwsh.exe") => {
             return find_flagged_script_path(argv, &["-file"], cwd)
@@ -361,6 +361,64 @@ fn infer_script_path(
     find_first_positional_path(argv.iter().skip(1), cwd)
 }
 
+fn infer_shell_script_path(argv: &[String], cwd: Option<&Path>) -> Option<String> {
+    let mut positionals = argv.iter().skip(1).peekable();
+
+    while let Some(value) = positionals.peek() {
+        let trimmed = value.trim();
+        if trimmed.is_empty() {
+            positionals.next();
+            continue;
+        }
+
+        if trimmed == "--" {
+            positionals.next();
+            break;
+        }
+
+        if !trimmed.starts_with('-') {
+            break;
+        }
+
+        if matches!(trimmed, "-c" | "-lc" | "-xc" | "-xec") {
+            return None;
+        }
+
+        positionals.next();
+    }
+
+    find_first_positional_path(positionals, cwd)
+}
+
+fn infer_python_script_path(argv: &[String], cwd: Option<&Path>) -> Option<String> {
+    let mut positionals = argv.iter().skip(1).peekable();
+
+    while let Some(value) = positionals.peek() {
+        let trimmed = value.trim();
+        if trimmed.is_empty() {
+            positionals.next();
+            continue;
+        }
+
+        if trimmed == "--" {
+            positionals.next();
+            break;
+        }
+
+        if !trimmed.starts_with('-') {
+            break;
+        }
+
+        if matches!(trimmed, "-c" | "-m") {
+            return None;
+        }
+
+        positionals.next();
+    }
+
+    find_first_positional_path(positionals, cwd)
+}
+
 fn find_flagged_script_path(argv: &[String], flags: &[&str], cwd: Option<&Path>) -> Option<String> {
     let flags = flags
         .iter()
@@ -383,8 +441,8 @@ fn find_first_positional_path<'a>(
 ) -> Option<String> {
     values
         .filter(|value| !value.trim().is_empty())
-        .filter(|value| !value.starts_with('-') && !value.starts_with('/'))
-        .find_map(|value| resolve_candidate_path(cwd, value))
+        .filter(|value| !value.starts_with('-'))
+        .find_map(|value| resolve_existing_candidate_path(cwd, value))
 }
 
 fn resolve_candidate_path(cwd: Option<&Path>, candidate: &str) -> Option<String> {
@@ -407,6 +465,11 @@ fn resolve_candidate_path(cwd: Option<&Path>, candidate: &str) -> Option<String>
             .to_string_lossy()
             .into_owned(),
     )
+}
+
+fn resolve_existing_candidate_path(cwd: Option<&Path>, candidate: &str) -> Option<String> {
+    let resolved = resolve_candidate_path(cwd, candidate)?;
+    Path::new(&resolved).is_file().then_some(resolved)
 }
 
 fn normalize_path_for_match(path: &Path) -> PathBuf {
@@ -556,14 +619,15 @@ fn path_to_string(path: &Path) -> String {
 
 #[cfg(test)]
 mod tests {
-    use std::fs;
+    use std::{fs, path::Path};
 
     use serde::Deserialize;
     use tempfile::tempdir;
 
     use super::{
-        decode_text, deserialize_call_chain_nodes, prompt_call_chain_paths,
-        read_allowlisted_call_chain_file, truncate_utf8, CallChainNode, CallChainPreviewStatus,
+        decode_text, deserialize_call_chain_nodes, infer_script_path, normalize_path_for_match,
+        prompt_call_chain_paths, read_allowlisted_call_chain_file, truncate_utf8, CallChainNode,
+        CallChainPreviewStatus,
     };
 
     #[derive(Deserialize)]
@@ -657,5 +721,65 @@ mod tests {
         assert!(truncated);
         assert!(value.len() <= 1024);
         assert!(value.is_char_boundary(value.len()));
+    }
+
+    #[test]
+    fn infers_shell_script_from_absolute_path_argument() {
+        let temp = tempdir().expect("temp directory should be created");
+        let script = temp.path().join("test.sh");
+        fs::write(&script, "#!/usr/bin/env bash\necho test\n")
+            .expect("script file should be written");
+
+        let inferred = infer_script_path(
+            &["/bin/bash".to_string(), script.display().to_string()],
+            None,
+            Some("bash"),
+        );
+
+        assert_eq!(
+            inferred
+                .as_deref()
+                .map(|path| normalize_path_for_match(Path::new(path))),
+            Some(normalize_path_for_match(script.as_path()))
+        );
+    }
+
+    #[test]
+    fn does_not_treat_shell_command_string_as_script_path() {
+        let inferred = infer_script_path(
+            &[
+                "/bin/bash".to_string(),
+                "-lc".to_string(),
+                "echo hello".to_string(),
+            ],
+            None,
+            Some("bash"),
+        );
+
+        assert_eq!(inferred, None);
+    }
+
+    #[test]
+    fn infers_python_script_from_explicit_script_argument() {
+        let temp = tempdir().expect("temp directory should be created");
+        let script = temp.path().join("tool.py");
+        fs::write(&script, "print('ok')\n").expect("python file should be written");
+
+        let inferred = infer_script_path(
+            &[
+                "/usr/bin/python3".to_string(),
+                script.display().to_string(),
+                "--flag".to_string(),
+            ],
+            None,
+            Some("python3"),
+        );
+
+        assert_eq!(
+            inferred
+                .as_deref()
+                .map(|path| normalize_path_for_match(Path::new(path))),
+            Some(normalize_path_for_match(script.as_path()))
+        );
     }
 }

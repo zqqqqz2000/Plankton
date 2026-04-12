@@ -8,6 +8,15 @@ use directories::ProjectDirs;
 use serde::Deserialize;
 
 const LOCAL_SECRET_CATALOG_RESOLVER_KIND: &str = "local_secret_catalog";
+const SECRET_CATALOG_BOOTSTRAP_TEMPLATE: &str = r#"# Plankton local secret catalog
+# Map approved resource identifiers to the secret values that `plankton get` should print.
+#
+# Example:
+# [secrets]
+# "secret/demo" = "replace-me"
+#
+[secrets]
+"#;
 
 pub trait ValueResolver: Send + Sync {
     fn kind(&self) -> &'static str;
@@ -24,6 +33,10 @@ pub struct LocalSecretCatalogResolver {
 pub enum ValueResolverError {
     #[error("secret catalog file not found at {path}")]
     CatalogMissing { path: String },
+    #[error("local secret catalog setup is required at {path}")]
+    CatalogBootstrapRequired { path: String, created: bool },
+    #[error("failed to create local secret catalog at {path}: {message}")]
+    CreateCatalog { path: String, message: String },
     #[error("failed to read secret catalog from {path}: {message}")]
     ReadCatalog { path: String, message: String },
     #[error("failed to parse secret catalog from {path}: {message}")]
@@ -45,6 +58,13 @@ struct SecretCatalogFile {
 impl LocalSecretCatalogResolver {
     pub fn load_default() -> Result<Self, ValueResolverError> {
         let path = local_secret_catalog_path();
+        if !path.exists() {
+            let created = bootstrap_secret_catalog(path.as_path())?;
+            return Err(ValueResolverError::CatalogBootstrapRequired {
+                path: path.display().to_string(),
+                created,
+            });
+        }
         Self::load_from_path(path.as_path())
     }
 
@@ -113,6 +133,28 @@ pub fn default_value_resolver() -> Result<LocalSecretCatalogResolver, ValueResol
     LocalSecretCatalogResolver::load_default()
 }
 
+fn bootstrap_secret_catalog(path: &Path) -> Result<bool, ValueResolverError> {
+    if path.exists() {
+        return Ok(false);
+    }
+
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|error| ValueResolverError::CreateCatalog {
+            path: path.display().to_string(),
+            message: error.to_string(),
+        })?;
+    }
+
+    fs::write(path, SECRET_CATALOG_BOOTSTRAP_TEMPLATE).map_err(|error| {
+        ValueResolverError::CreateCatalog {
+            path: path.display().to_string(),
+            message: error.to_string(),
+        }
+    })?;
+
+    Ok(true)
+}
+
 fn parse_secret_catalog(
     path: &Path,
     content: &str,
@@ -159,7 +201,9 @@ mod tests {
 
     use tempfile::tempdir;
 
-    use super::{default_value_resolver, LocalSecretCatalogResolver, ValueResolver};
+    use super::{
+        default_value_resolver, LocalSecretCatalogResolver, ValueResolver, ValueResolverError,
+    };
 
     #[test]
     fn resolves_value_from_secrets_table() {
@@ -235,5 +279,34 @@ mod tests {
                 .expect("value should resolve"),
             "demo-value"
         );
+    }
+
+    #[test]
+    fn default_value_resolver_bootstraps_missing_catalog() {
+        let temp = tempdir().expect("temp directory should be created");
+        let path = temp.path().join("catalog.toml");
+
+        unsafe {
+            std::env::set_var("PLANKTON_SECRET_FILE", path.as_os_str());
+        }
+        let error = default_value_resolver().expect_err("missing catalog should bootstrap");
+        unsafe {
+            std::env::remove_var("PLANKTON_SECRET_FILE");
+        }
+
+        match error {
+            ValueResolverError::CatalogBootstrapRequired {
+                path: error_path,
+                created,
+            } => {
+                assert!(created);
+                assert_eq!(error_path, path.display().to_string());
+            }
+            other => panic!("unexpected error: {other}"),
+        }
+
+        let content = fs::read_to_string(&path).expect("bootstrap catalog should be created");
+        assert!(content.contains("[secrets]"));
+        assert!(content.contains("\"secret/demo\" = \"replace-me\""));
     }
 }
