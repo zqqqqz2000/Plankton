@@ -6,10 +6,10 @@ use plankton_core::{
     build_provider_input_snapshot, escalate_for_secret_exposure_risk,
     evaluate_automatic_disposition, evaluate_local_hard_rules, generate_llm_suggestion,
     render_request_template, request_llm_suggestion, sanitize_prompt_context,
-    sanitize_request_context_for_storage, secret_exposure_risk, AccessRequest,
-    AuditRecord, AutomaticDecisionTrace, DashboardData, Decision, DomainError, LlmSuggestion,
-    PlanktonSettings, PolicyMode, ProviderError, ProviderInputSnapshot, RequestContext,
-    TemplateError,
+    sanitize_request_context_for_storage, secret_exposure_risk, AccessRequest, AuditRecord,
+    AutomaticDecisionTrace, DashboardData, Decision, DomainError, LlmSuggestion, PlanktonSettings,
+    PolicyMode, ProviderError, ProviderInputSnapshot, RequestContext, TemplateError,
+    DEFAULT_USER_PROVIDER_KIND,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -28,6 +28,15 @@ pub struct SqliteStore {
 pub struct RequestQueryResult {
     pub request: AccessRequest,
     pub audit_records: Vec<AuditRecord>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct AccessibleResourceRecord {
+    pub resource: String,
+    pub granted_by_request_id: String,
+    pub policy_mode: PolicyMode,
+    pub provider_kind: Option<String>,
+    pub granted_at: DateTime<Utc>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -77,70 +86,68 @@ impl SqliteStore {
     ) -> Result<AccessRequest, StoreError> {
         let sanitized_context = sanitize_prompt_context(&context);
         let stored_context = sanitize_request_context_for_storage(&context);
-        let rendered_prompt = render_request_template(
-            &settings.request_template,
-            &sanitized_context,
-            policy_mode,
-        )?;
+        let rendered_prompt =
+            render_request_template(&settings.request_template, &sanitized_context, policy_mode)?;
         let normalized_provider_kind = normalized_provider_kind(settings);
-        let (provider_kind, provider_input, llm_suggestion, automatic_decision) =
-            match policy_mode {
-                PolicyMode::ManualOnly => (None, None, None, None),
-                PolicyMode::Assisted => {
-                    let (provider_input, llm_suggestion) =
-                        generate_llm_suggestion(settings, policy_mode, &sanitized_context).await?;
-                    (
-                        Some(normalized_provider_kind),
-                        Some(provider_input),
-                        Some(llm_suggestion),
-                        None,
-                    )
-                }
-                PolicyMode::LlmAutomatic => {
-                    let provider_kind = Some(normalized_provider_kind);
+        let (provider_kind, provider_input, llm_suggestion, automatic_decision) = match policy_mode
+        {
+            PolicyMode::ManualOnly => (None, None, None, None),
+            PolicyMode::Assisted => {
+                let (provider_input, llm_suggestion) =
+                    generate_llm_suggestion(settings, policy_mode, &context, &sanitized_context)
+                        .await?;
+                (
+                    Some(normalized_provider_kind),
+                    Some(provider_input),
+                    Some(llm_suggestion),
+                    None,
+                )
+            }
+            PolicyMode::LlmAutomatic => {
+                let provider_kind = Some(normalized_provider_kind);
 
-                    if let Some(local_decision) =
-                        evaluate_local_hard_rules(&context, &sanitized_context)
-                    {
-                        (provider_kind, None, None, Some(local_decision))
-                    } else {
-                        let provider_input = build_provider_input_snapshot(
-                            settings,
-                            policy_mode,
+                if let Some(local_decision) =
+                    evaluate_local_hard_rules(&context, &sanitized_context)
+                {
+                    (provider_kind, None, None, Some(local_decision))
+                } else {
+                    let provider_input = build_provider_input_snapshot(
+                        settings,
+                        policy_mode,
+                        &context,
+                        &sanitized_context,
+                    )?;
+
+                    if secret_exposure_risk(&sanitized_context) {
+                        let automatic_decision = escalate_for_secret_exposure_risk(
                             &sanitized_context,
-                        )?;
-
-                        if secret_exposure_risk(&sanitized_context) {
-                            let automatic_decision = escalate_for_secret_exposure_risk(
-                                &sanitized_context,
-                                Some(&provider_input),
-                            );
-                            (
-                                provider_kind,
-                                Some(provider_input),
-                                None,
-                                Some(automatic_decision),
-                            )
-                        } else {
-                            let llm_suggestion =
-                                request_llm_suggestion(settings, policy_mode, &provider_input)
-                                    .await;
-                            let automatic_decision = evaluate_automatic_disposition(
-                                provider_kind.as_deref(),
-                                Some(&provider_input),
-                                Some(&llm_suggestion),
-                                &sanitized_context,
-                            );
-                            (
-                                provider_kind,
-                                Some(provider_input),
-                                Some(llm_suggestion),
-                                Some(automatic_decision),
-                            )
-                        }
+                            Some(&provider_input),
+                        );
+                        (
+                            provider_kind,
+                            Some(provider_input),
+                            None,
+                            Some(automatic_decision),
+                        )
+                    } else {
+                        let llm_suggestion =
+                            request_llm_suggestion(settings, policy_mode, &provider_input).await;
+                        let automatic_decision = evaluate_automatic_disposition(
+                            provider_kind.as_deref(),
+                            Some(&provider_input),
+                            Some(&llm_suggestion),
+                            &sanitized_context,
+                        );
+                        (
+                            provider_kind,
+                            Some(provider_input),
+                            Some(llm_suggestion),
+                            Some(automatic_decision),
+                        )
                     }
                 }
-            };
+            }
+        };
         let mut request = AccessRequest::new_pending(
             stored_context,
             policy_mode,
@@ -256,6 +263,37 @@ impl SqliteStore {
     }
 
     #[instrument(skip(self))]
+    pub async fn list_accessible_resources(
+        &self,
+    ) -> Result<Vec<AccessibleResourceRecord>, StoreError> {
+        let rows = sqlx::query(
+            r#"
+            SELECT id, resource, policy_mode, provider_kind, granted_at
+            FROM (
+                SELECT
+                    id,
+                    resource,
+                    policy_mode,
+                    provider_kind,
+                    COALESCE(resolved_at, updated_at, created_at) AS granted_at,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY resource
+                        ORDER BY COALESCE(resolved_at, updated_at, created_at) DESC, updated_at DESC, id DESC
+                    ) AS row_number
+                FROM access_requests
+                WHERE final_decision = 'allow'
+            )
+            WHERE row_number = 1
+            ORDER BY resource ASC
+            "#,
+        )
+        .fetch_all(&self.pool)
+        .await?;
+
+        rows.iter().map(decode_accessible_resource).collect()
+    }
+
+    #[instrument(skip(self))]
     pub async fn list_audit_records(&self, limit: u32) -> Result<Vec<AuditRecord>, StoreError> {
         let rows = sqlx::query(
             r#"
@@ -362,7 +400,9 @@ fn option_enum_to_string<T: serde::Serialize>(
     }
 }
 
-fn option_json_string<T: serde::Serialize>(value: &Option<T>) -> Result<Option<String>, StoreError> {
+fn option_json_string<T: serde::Serialize>(
+    value: &Option<T>,
+) -> Result<Option<String>, StoreError> {
     match value {
         Some(value) => Ok(Some(serde_json::to_string(value)?)),
         None => Ok(None),
@@ -372,7 +412,7 @@ fn option_json_string<T: serde::Serialize>(value: &Option<T>) -> Result<Option<S
 fn normalized_provider_kind(settings: &PlanktonSettings) -> String {
     let provider_kind = settings.provider_kind.trim().to_ascii_lowercase();
     if provider_kind.is_empty() {
-        "mock".to_string()
+        DEFAULT_USER_PROVIDER_KIND.to_string()
     } else {
         provider_kind
     }
@@ -442,6 +482,18 @@ fn decode_request(row: &sqlx::sqlite::SqliteRow) -> Result<AccessRequest, StoreE
     })
 }
 
+fn decode_accessible_resource(
+    row: &sqlx::sqlite::SqliteRow,
+) -> Result<AccessibleResourceRecord, StoreError> {
+    Ok(AccessibleResourceRecord {
+        resource: row.try_get("resource")?,
+        granted_by_request_id: row.try_get("id")?,
+        policy_mode: parse_enum(row.try_get::<String, _>("policy_mode")?.as_str())?,
+        provider_kind: row.try_get("provider_kind")?,
+        granted_at: parse_datetime(row.try_get::<String, _>("granted_at")?.as_str())?,
+    })
+}
+
 fn decode_audit(row: &sqlx::sqlite::SqliteRow) -> Result<AuditRecord, StoreError> {
     let payload: Value = serde_json::from_str(row.try_get::<String, _>("payload_json")?.as_str())?;
     let action = parse_enum(row.try_get::<String, _>("action")?.as_str())?;
@@ -486,8 +538,8 @@ mod tests {
     use tempfile::tempdir;
 
     use plankton_core::{
-        load_settings, ApprovalStatus, AuditAction, AutomaticDisposition, Decision, PolicyMode,
-        RequestContext,
+        load_settings, ApprovalStatus, AuditAction, AutomaticDisposition, CallChainNode, Decision,
+        PolicyMode, RequestContext,
     };
 
     use super::SqliteStore;
@@ -580,12 +632,10 @@ mod tests {
             .await
             .expect("request should load");
         assert_eq!(fetched.audit_records.len(), 2);
-        assert!(
-            fetched
-                .audit_records
-                .iter()
-                .any(|record| record.action == plankton_core::AuditAction::LlmSuggestionGenerated)
-        );
+        assert!(fetched
+            .audit_records
+            .iter()
+            .any(|record| record.action == plankton_core::AuditAction::LlmSuggestionGenerated));
     }
 
     #[tokio::test]
@@ -622,19 +672,19 @@ mod tests {
             .await
             .expect("decision should be persisted");
 
-        assert_eq!(updated.approval_status, plankton_core::ApprovalStatus::Rejected);
+        assert_eq!(
+            updated.approval_status,
+            plankton_core::ApprovalStatus::Rejected
+        );
 
         let fetched = store
             .get_request(&request.id)
             .await
             .expect("request should load");
-        assert!(
-            fetched
-                .audit_records
-                .iter()
-                .any(|record| record.action
-                    == plankton_core::AuditAction::HumanDecisionOverrodeLlm)
-        );
+        assert!(fetched
+            .audit_records
+            .iter()
+            .any(|record| record.action == plankton_core::AuditAction::HumanDecisionOverrodeLlm));
     }
 
     #[tokio::test]
@@ -684,12 +734,10 @@ mod tests {
                 .count(),
             1
         );
-        assert!(
-            fetched
-                .audit_records
-                .iter()
-                .any(|record| record.action == AuditAction::AutomaticDecisionRecorded)
-        );
+        assert!(fetched
+            .audit_records
+            .iter()
+            .any(|record| record.action == AuditAction::AutomaticDecisionRecorded));
         assert_eq!(
             sqlx::query_scalar::<_, String>(
                 "SELECT actor_type FROM audit_records WHERE request_id = ? AND action = 'approval_recorded'"
@@ -749,12 +797,10 @@ mod tests {
             .await
             .expect("request should load");
         assert_eq!(fetched.audit_records.len(), 3);
-        assert!(
-            fetched
-                .audit_records
-                .iter()
-                .any(|record| record.action == AuditAction::AutomaticEscalatedToHuman)
-        );
+        assert!(fetched
+            .audit_records
+            .iter()
+            .any(|record| record.action == AuditAction::AutomaticEscalatedToHuman));
         assert_eq!(
             sqlx::query_scalar::<_, String>(
                 "SELECT actor_type FROM audit_records WHERE request_id = ? AND action = 'automatic_escalated_to_human'"
@@ -785,16 +831,17 @@ mod tests {
         );
         context.script_path = Some("/Users/jpx/private/run-secret.sh".to_string());
         context.call_chain = vec![
-            "/Users/jpx/private/run-secret.sh".to_string(),
-            "bash".to_string(),
+            CallChainNode::legacy_path("/Users/jpx/private/run-secret.sh"),
+            CallChainNode::legacy_path("bash"),
         ];
         context.env_vars.insert(
             "OPENAI_API_KEY".to_string(),
             "sk-test-super-secret-value".to_string(),
         );
-        context
-            .env_vars
-            .insert("SESSION_TOKEN".to_string(), "super-secret-session-token".to_string());
+        context.env_vars.insert(
+            "SESSION_TOKEN".to_string(),
+            "super-secret-session-token".to_string(),
+        );
         context.metadata.insert(
             "api_token".to_string(),
             "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string(),
@@ -817,12 +864,115 @@ mod tests {
         .await
         .expect("request payloads should be queryable");
 
-        assert!(!context_json.contains("/Users/jpx/private/run-secret.sh"));
-        assert!(!provider_input_json.contains("/Users/jpx/private/run-secret.sh"));
+        assert!(context_json.contains("/Users/jpx/private/run-secret.sh"));
+        assert!(provider_input_json.contains("/Users/jpx/private/run-secret.sh"));
         assert!(!context_json.contains("sk-test-super-secret-value"));
         assert!(!context_json.contains("super-secret-session-token"));
         assert!(!context_json.contains("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"));
         assert!(context_json.contains("[redacted]"));
-        assert!(provider_input_json.contains("run-secret.sh"));
+        assert!(!context_json.contains("\"preview_text\":\"echo secret\""));
+    }
+
+    #[tokio::test]
+    async fn lists_only_accessible_resources_without_duplicates_or_denied_entries() {
+        let temp = tempdir().expect("temp directory should be created");
+        let mut settings = load_settings().expect("default settings should load");
+        settings.database_url = format!("sqlite://{}", temp.path().join("plankton.db").display());
+
+        let store = SqliteStore::new(&settings)
+            .await
+            .expect("store should initialize");
+
+        let allow_request = store
+            .submit_request(
+                &settings,
+                RequestContext::new(
+                    "secret/shared-token".to_string(),
+                    "Need shared access".to_string(),
+                    "alice".to_string(),
+                ),
+                PolicyMode::ManualOnly,
+            )
+            .await
+            .expect("allow request should be inserted");
+        store
+            .record_decision(
+                &allow_request.id,
+                Decision::Allow,
+                "reviewer",
+                Some("approved".to_string()),
+            )
+            .await
+            .expect("allow decision should persist");
+
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+
+        let superseding_allow = store
+            .submit_request(
+                &settings,
+                RequestContext::new(
+                    "secret/shared-token".to_string(),
+                    "Need newer shared access".to_string(),
+                    "alice".to_string(),
+                ),
+                PolicyMode::Assisted,
+            )
+            .await
+            .expect("superseding allow request should be inserted");
+        store
+            .record_decision(
+                &superseding_allow.id,
+                Decision::Allow,
+                "reviewer",
+                Some("approved again".to_string()),
+            )
+            .await
+            .expect("superseding allow decision should persist");
+
+        let denied_request = store
+            .submit_request(
+                &settings,
+                RequestContext::new(
+                    "secret/denied-token".to_string(),
+                    "Need denied access".to_string(),
+                    "alice".to_string(),
+                ),
+                PolicyMode::ManualOnly,
+            )
+            .await
+            .expect("denied request should be inserted");
+        store
+            .record_decision(
+                &denied_request.id,
+                Decision::Deny,
+                "reviewer",
+                Some("denied".to_string()),
+            )
+            .await
+            .expect("deny decision should persist");
+
+        let pending_request = store
+            .submit_request(
+                &settings,
+                RequestContext::new(
+                    "secret/pending-token".to_string(),
+                    "Need pending access".to_string(),
+                    "alice".to_string(),
+                ),
+                PolicyMode::ManualOnly,
+            )
+            .await
+            .expect("pending request should be inserted");
+        assert_eq!(pending_request.approval_status, ApprovalStatus::Pending);
+
+        let resources = store
+            .list_accessible_resources()
+            .await
+            .expect("accessible resources should load");
+
+        assert_eq!(resources.len(), 1);
+        assert_eq!(resources[0].resource, "secret/shared-token");
+        assert_eq!(resources[0].granted_by_request_id, superseding_allow.id);
+        assert_eq!(resources[0].policy_mode, PolicyMode::Assisted);
     }
 }

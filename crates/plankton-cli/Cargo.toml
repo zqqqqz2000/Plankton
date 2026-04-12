@@ -1,6 +1,6 @@
 [package]
-name = "plankton-cli"
-description = "Read-only CLI for Plankton access attempts, request inspection, and audit queries"
+name = "plankton"
+description = "Command-line companion for listing, searching, and requesting Plankton resources"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -19,3 +19,6 @@ serde_json.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
+
+[dev-dependencies]
+tempfile = "3.13"

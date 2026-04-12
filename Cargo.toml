@@ -34,3 +34,4 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 toml = "0.8"
 uuid = { version = "1.8", features = ["serde", "v4"] }
+sysinfo = { version = "0.38.4", default-features = true }
