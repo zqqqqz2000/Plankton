@@ -19,8 +19,8 @@ use crate::{
     read_allowlisted_paths_file, render_llm_advice_template, AcpSessionClient, LlmSuggestion,
     LlmSuggestionUsage, PlanktonSettings, PolicyMode, ProviderInputSnapshot, ProviderTrace,
     RequestContext, SanitizedPromptContext, SuggestedDecision, TemplateError,
-    ACP_CODEX_PROVIDER_KIND, LLM_ADVICE_TEMPLATE_ID, LLM_ADVICE_TEMPLATE_VERSION,
-    PROMPT_CONTRACT_VERSION,
+    ACP_LEGACY_CODEX_PROVIDER_KIND, ACP_PROVIDER_KIND, LLM_ADVICE_TEMPLATE_ID,
+    LLM_ADVICE_TEMPLATE_VERSION, PROMPT_CONTRACT_VERSION,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -460,12 +460,12 @@ impl ProviderAdapter for ClaudeMessagesAdapter {
 }
 
 #[derive(Debug, Clone)]
-pub struct AcpCodexAdapter {
+pub struct AcpAdapter {
     client: AcpSessionClient,
     system_prompt: String,
 }
 
-impl AcpCodexAdapter {
+impl AcpAdapter {
     pub fn try_from_settings(settings: &PlanktonSettings) -> Result<Self, ProviderError> {
         Ok(Self {
             client: AcpSessionClient::from_settings(settings)?,
@@ -475,9 +475,9 @@ impl AcpCodexAdapter {
 }
 
 #[async_trait]
-impl ProviderAdapter for AcpCodexAdapter {
+impl ProviderAdapter for AcpAdapter {
     fn kind(&self) -> &'static str {
-        ACP_CODEX_PROVIDER_KIND
+        ACP_PROVIDER_KIND
     }
 
     async fn evaluate(&self, request: ProviderRequest) -> Result<ProviderResponse, ProviderError> {
@@ -593,7 +593,9 @@ fn build_provider_adapter(
         CLAUDE_PROVIDER_KIND => Ok(Box::new(ClaudeMessagesAdapter::try_from_settings(
             settings,
         )?)),
-        ACP_CODEX_PROVIDER_KIND => Ok(Box::new(AcpCodexAdapter::try_from_settings(settings)?)),
+        ACP_PROVIDER_KIND | ACP_LEGACY_CODEX_PROVIDER_KIND => {
+            Ok(Box::new(AcpAdapter::try_from_settings(settings)?))
+        }
         other => Err(ProviderError::Unsupported(other.to_string())),
     }
 }
@@ -1249,5 +1251,30 @@ mod tests {
             Some(CLAUDE_STOP_REASON_REFUSAL)
         );
         assert!(suggestion.error.is_none());
+    }
+
+    #[test]
+    fn build_provider_adapter_accepts_generic_acp_provider_kind() {
+        let mut settings = PlanktonSettings::default();
+        settings.provider_kind = ACP_PROVIDER_KIND.to_string();
+        settings.acp_codex_program = "custom-acp-client".to_string();
+        settings.acp_codex_args = String::new();
+
+        let adapter = build_provider_adapter(&settings).expect("generic ACP adapter should build");
+
+        assert_eq!(adapter.kind(), ACP_PROVIDER_KIND);
+    }
+
+    #[test]
+    fn build_provider_adapter_upgrades_legacy_acp_codex_provider_kind() {
+        let mut settings = PlanktonSettings::default();
+        settings.provider_kind = ACP_LEGACY_CODEX_PROVIDER_KIND.to_string();
+        settings.acp_codex_program = "custom-acp-client".to_string();
+        settings.acp_codex_args = String::new();
+
+        let adapter = build_provider_adapter(&settings)
+            .expect("legacy acp_codex provider kind should remain compatible");
+
+        assert_eq!(adapter.kind(), ACP_PROVIDER_KIND);
     }
 }
