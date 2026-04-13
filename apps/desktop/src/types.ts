@@ -200,3 +200,51 @@ export type ImportedSecretReceipt = {
   catalog_path: string;
   reference: ImportedSecretReference;
 };
+
+export type ImportPickerOption = {
+  id: string;
+  label: string;
+  subtitle?: string | null;
+};
+
+export type ImportFieldOption = {
+  selector: string;
+  label: string;
+  subtitle?: string | null;
+  field_id?: string | null;
+};
+
+export type BitwardenContainerKind =
+  | "all"
+  | "organization"
+  | "collection"
+  | "folder";
+
+export type BitwardenContainerOption = {
+  id: string;
+  kind: BitwardenContainerKind;
+  label: string;
+  subtitle?: string | null;
+  organization_id?: string | null;
+  organization_label?: string | null;
+};
+
+export type DotenvGroupOption = {
+  id: string;
+  label: string;
+  namespace?: string | null;
+  prefix?: string | null;
+  key_count: number;
+};
+
+export type DotenvKeyOption = {
+  group_id: string;
+  label: string;
+  full_key: string;
+};
+
+export type DotenvInspection = {
+  file_path: string;
+  groups: DotenvGroupOption[];
+  keys: DotenvKeyOption[];
+};

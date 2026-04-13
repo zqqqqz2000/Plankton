@@ -14,6 +14,8 @@ tauri-build.workspace = true
 plankton-core = { path = "../../../crates/plankton-core" }
 plankton-store = { path = "../../../crates/plankton-store" }
 anyhow.workspace = true
+dotenvy.workspace = true
+rfd = "0.15"
 serde.workspace = true
 serde_json.workspace = true
 tauri.workspace = true

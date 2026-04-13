@@ -1,6 +1,14 @@
+mod import_browse;
+
 use std::sync::Mutex;
 
 use anyhow::{Context, Result};
+use import_browse::{
+    inspect_dotenv_file, list_bitwarden_accounts, list_bitwarden_containers, list_bitwarden_fields,
+    list_bitwarden_items, list_onepassword_accounts, list_onepassword_fields,
+    list_onepassword_items, list_onepassword_vaults, pick_dotenv_file, BitwardenContainerOption,
+    DotenvInspection, ImportFieldOption, ImportPickerOption,
+};
 use plankton_core::{
     import_secret_reference, load_settings, preview_call_chain_for_desktop,
     save_user_default_policy_mode, save_user_settings, AccessRequest, DashboardData, Decision,
@@ -212,6 +220,74 @@ async fn import_secret_source(spec: SecretImportSpec) -> Result<ImportedSecretRe
 }
 
 #[tauri::command]
+fn list_onepassword_accounts_command() -> Result<Vec<ImportPickerOption>, String> {
+    list_onepassword_accounts().map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn list_onepassword_vaults_command(account_id: String) -> Result<Vec<ImportPickerOption>, String> {
+    list_onepassword_vaults(account_id.as_str()).map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn list_onepassword_items_command(
+    account_id: String,
+    vault_id: String,
+) -> Result<Vec<ImportPickerOption>, String> {
+    list_onepassword_items(account_id.as_str(), vault_id.as_str())
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn list_onepassword_fields_command(
+    account_id: String,
+    vault_id: String,
+    item_id: String,
+) -> Result<Vec<ImportFieldOption>, String> {
+    list_onepassword_fields(account_id.as_str(), vault_id.as_str(), item_id.as_str())
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn list_bitwarden_accounts_command() -> Result<Vec<ImportPickerOption>, String> {
+    list_bitwarden_accounts().map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn list_bitwarden_containers_command() -> Result<Vec<BitwardenContainerOption>, String> {
+    list_bitwarden_containers().map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn list_bitwarden_items_command(
+    container_kind: Option<String>,
+    container_id: Option<String>,
+    organization_id: Option<String>,
+) -> Result<Vec<ImportPickerOption>, String> {
+    list_bitwarden_items(
+        container_kind.as_deref(),
+        container_id.as_deref(),
+        organization_id.as_deref(),
+    )
+    .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn list_bitwarden_fields_command(item_id: String) -> Result<Vec<ImportFieldOption>, String> {
+    list_bitwarden_fields(item_id.as_str()).map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn pick_dotenv_file_command() -> Result<Option<String>, String> {
+    pick_dotenv_file().map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn inspect_dotenv_file_command(file_path: String) -> Result<DotenvInspection, String> {
+    inspect_dotenv_file(file_path.as_str()).map_err(|error| error.to_string())
+}
+
+#[tauri::command]
 async fn approve_request(
     request_id: String,
     note: Option<String>,
@@ -286,6 +362,16 @@ fn run() -> Result<()> {
             set_default_policy_mode,
             save_desktop_settings,
             import_secret_source,
+            list_onepassword_accounts_command,
+            list_onepassword_vaults_command,
+            list_onepassword_items_command,
+            list_onepassword_fields_command,
+            list_bitwarden_accounts_command,
+            list_bitwarden_containers_command,
+            list_bitwarden_items_command,
+            list_bitwarden_fields_command,
+            pick_dotenv_file_command,
+            inspect_dotenv_file_command,
             approve_request,
             reject_request,
             consume_handoff_request

@@ -240,6 +240,16 @@ function setFieldValue(
   });
 }
 
+function getPickerOption(
+  container: HTMLElement,
+  pickerTestId: string,
+  optionId: string,
+): HTMLButtonElement | null {
+  return container.querySelector<HTMLButtonElement>(
+    `[data-testid="${pickerTestId}-option"][data-option-id="${optionId}"]`,
+  );
+}
+
 beforeEach(() => {
   vi.useFakeTimers();
   window.localStorage.clear();
@@ -345,6 +355,43 @@ describe("useDesktopApp runtime wiring", () => {
   });
 
   it("routes password-management imports through import_secret_source without breaking the approvals shell", async () => {
+    const dotenvInspection = {
+      file_path: "/tmp/app.env",
+      groups: [
+        {
+          id: "all",
+          label: "All keys",
+          namespace: null,
+          prefix: null,
+          key_count: 2,
+        },
+        {
+          id: "prod-app",
+          label: "prod / APP_",
+          namespace: "prod",
+          prefix: "APP_",
+          key_count: 1,
+        },
+      ],
+      keys: [
+        {
+          group_id: "all",
+          label: "APP_API_TOKEN",
+          full_key: "APP_API_TOKEN",
+        },
+        {
+          group_id: "all",
+          label: "OTHER_KEY",
+          full_key: "OTHER_KEY",
+        },
+        {
+          group_id: "prod-app",
+          label: "API_TOKEN",
+          full_key: "APP_API_TOKEN",
+        },
+      ],
+    };
+
     tauri.listen.mockImplementation(async () => tauri.unlisten);
     tauri.invoke.mockImplementation(async (command: string) => {
       switch (command) {
@@ -354,6 +401,12 @@ describe("useDesktopApp runtime wiring", () => {
           return SETTINGS;
         case "consume_handoff_request":
           return null;
+        case "list_onepassword_accounts_command":
+          return [];
+        case "pick_dotenv_file_command":
+          return "/tmp/app.env";
+        case "inspect_dotenv_file_command":
+          return dotenvInspection;
         case "import_secret_source":
           return {
             catalog_path: "catalog/password/env/api_token",
@@ -424,29 +477,19 @@ describe("useDesktopApp runtime wiring", () => {
       ),
       "prod, api",
     );
-    setFieldValue(
-      view.container.querySelector<HTMLInputElement>(
-        '[data-testid="password-field-dotenv-file"] input',
+    await clickAsync(
+      view.container.querySelector<HTMLButtonElement>(
+        '[data-testid="dotenv-choose-file-button"]',
       ),
-      "/tmp/app.env",
     );
-    setFieldValue(
-      view.container.querySelector<HTMLInputElement>(
-        '[data-testid="password-field-dotenv-namespace"] input',
-      ),
-      "prod",
-    );
-    setFieldValue(
-      view.container.querySelector<HTMLInputElement>(
-        '[data-testid="password-field-dotenv-prefix"] input',
-      ),
-      "APP_",
-    );
-    setFieldValue(
-      view.container.querySelector<HTMLInputElement>(
-        '[data-testid="password-field-dotenv-key"] input',
-      ),
-      "API_TOKEN",
+    await flushReact();
+    await flushReact();
+
+    click(getPickerOption(view.container, "dotenv-group-picker", "prod-app"));
+    await flushReact();
+
+    click(
+      getPickerOption(view.container, "dotenv-key-picker", "APP_API_TOKEN"),
     );
     await flushReact();
 
@@ -513,7 +556,7 @@ describe("useDesktopApp runtime wiring", () => {
     view.unmount();
   });
 
-  it("renders provider-specific locator fields for all password source types", async () => {
+  it("renders picker-first import controls for all password source types", async () => {
     tauri.listen.mockImplementation(async () => tauri.unlisten);
     tauri.invoke.mockImplementation(async (command: string) => {
       switch (command) {
@@ -523,6 +566,53 @@ describe("useDesktopApp runtime wiring", () => {
           return SETTINGS;
         case "consume_handoff_request":
           return null;
+        case "list_onepassword_accounts_command":
+          return [{ id: "acct-1", label: "Personal" }];
+        case "list_onepassword_vaults_command":
+          return [{ id: "vault-1", label: "Engineering" }];
+        case "list_onepassword_items_command":
+          return [{ id: "item-1", label: "API Token" }];
+        case "list_onepassword_fields_command":
+          return [
+            {
+              selector: "password",
+              label: "Password",
+              subtitle: "login.password",
+              field_id: "field-1",
+            },
+          ];
+        case "list_bitwarden_accounts_command":
+          return [{ id: "bw-account", label: "user@example.com" }];
+        case "list_bitwarden_containers_command":
+          return [
+            {
+              id: "all",
+              kind: "all",
+              label: "All items",
+              subtitle: "Everything",
+              organization_id: null,
+              organization_label: null,
+            },
+            {
+              id: "collection-1",
+              kind: "collection",
+              label: "Payments",
+              subtitle: "Corp",
+              organization_id: "org-1",
+              organization_label: "Corp",
+            },
+          ];
+        case "list_bitwarden_items_command":
+          return [{ id: "bw-item-1", label: "Stripe Secret" }];
+        case "list_bitwarden_fields_command":
+          return [
+            {
+              selector: "login.password",
+              label: "Password",
+              subtitle: "Generated password",
+              field_id: null,
+            },
+          ];
         default:
           throw new Error(`Unexpected command: ${command}`);
       }
@@ -537,6 +627,8 @@ describe("useDesktopApp runtime wiring", () => {
       ),
     );
     await flushReact();
+    await flushReact();
+    await flushReact();
 
     expect(
       view.container.querySelector(
@@ -545,20 +637,35 @@ describe("useDesktopApp runtime wiring", () => {
     ).toBe("account / vault / item / field");
     expect(
       view.container.querySelector(
-        '[data-testid="password-field-1password-account"] input',
+        '[data-testid="onepassword-account-picker"]',
+      ),
+    ).not.toBeNull();
+    expect(
+      view.container.querySelector('[data-testid="onepassword-vault-picker"]'),
+    ).not.toBeNull();
+    expect(
+      view.container.querySelector(
+        '[data-testid="onepassword-item-picker-search"]',
       ),
     ).not.toBeNull();
     expect(
       view.container.querySelector(
-        '[data-testid="password-field-1password-vault"] input',
+        '[data-testid="onepassword-field-picker-option"][data-option-id="field-1"]',
       ),
     ).not.toBeNull();
+    expect(
+      view.container.querySelector(
+        '[data-testid="onepassword-field-fallback"]',
+      ),
+    ).toBeNull();
 
     click(
       view.container.querySelector<HTMLButtonElement>(
         '[data-testid="password-provider-option-bitwarden_cli"]',
       ),
     );
+    await flushReact();
+    await flushReact();
     await flushReact();
 
     expect(
@@ -567,18 +674,26 @@ describe("useDesktopApp runtime wiring", () => {
       )?.textContent,
     ).toBe("account / organization|collection|folder / item / field");
     expect(
+      view.container.querySelector('[data-testid="bitwarden-account-picker"]'),
+    ).not.toBeNull();
+    expect(
       view.container.querySelector(
-        '[data-testid="password-field-bitwarden-organization"] input',
+        '[data-testid="bitwarden-container-picker"]',
       ),
     ).not.toBeNull();
     expect(
       view.container.querySelector(
-        '[data-testid="password-field-bitwarden-collection"] input',
+        '[data-testid="bitwarden-item-picker-search"]',
       ),
     ).not.toBeNull();
     expect(
       view.container.querySelector(
-        '[data-testid="password-field-bitwarden-folder"] input',
+        '[data-testid="bitwarden-field-picker-option"][data-option-id="login.password"]',
+      ),
+    ).not.toBeNull();
+    expect(
+      view.container.querySelector(
+        '[data-testid="password-field-bitwarden-field"] input',
       ),
     ).not.toBeNull();
 
@@ -595,19 +710,18 @@ describe("useDesktopApp runtime wiring", () => {
       )?.textContent,
     ).toBe("file / namespace|prefix / key");
     expect(
+      view.container.querySelector('[data-testid="dotenv-choose-file-button"]'),
+    ).not.toBeNull();
+    expect(
       view.container.querySelector(
         '[data-testid="password-field-dotenv-file"] input',
       ),
     ).not.toBeNull();
     expect(
-      view.container.querySelector(
-        '[data-testid="password-field-dotenv-namespace"] input',
-      ),
+      view.container.querySelector('[data-testid="dotenv-group-picker"]'),
     ).not.toBeNull();
     expect(
-      view.container.querySelector(
-        '[data-testid="password-field-dotenv-prefix"] input',
-      ),
+      view.container.querySelector('[data-testid="dotenv-key-picker-search"]'),
     ).not.toBeNull();
 
     view.unmount();
