@@ -634,6 +634,10 @@ export function PasswordManagementView(
   }
 
   function selectOnePasswordAccount(nextAccountId: string): void {
+    if (nextAccountId === selectedOnePasswordAccountId) {
+      return;
+    }
+
     const nextAccount =
       onePasswordAccounts.find((option) => option.id === nextAccountId) ?? null;
     setSelectedOnePasswordAccountId(nextAccountId);
@@ -658,6 +662,10 @@ export function PasswordManagementView(
   }
 
   function selectOnePasswordVault(nextVaultId: string): void {
+    if (nextVaultId === selectedOnePasswordVaultId) {
+      return;
+    }
+
     const nextVault =
       onePasswordVaults.find((option) => option.id === nextVaultId) ?? null;
     setSelectedOnePasswordVaultId(nextVaultId);
@@ -678,6 +686,10 @@ export function PasswordManagementView(
   }
 
   function selectOnePasswordItem(nextItemId: string): void {
+    if (nextItemId === selectedOnePasswordItemId) {
+      return;
+    }
+
     const nextItem =
       onePasswordItems.find((option) => option.id === nextItemId) ?? null;
     setSelectedOnePasswordItemId(nextItemId);

@@ -731,6 +731,81 @@ describe("useDesktopApp runtime wiring", () => {
     view.unmount();
   });
 
+  it("keeps 1Password vaults populated when the active account is clicked again", async () => {
+    tauri.listen.mockImplementation(async () => tauri.unlisten);
+    tauri.invoke.mockImplementation(async (command: string) => {
+      switch (command) {
+        case "dashboard":
+          return DASHBOARD;
+        case "desktop_settings":
+          return SETTINGS;
+        case "consume_handoff_request":
+          return null;
+        case "list_onepassword_accounts_command":
+          return [
+            { id: "acct-1", label: "demo@example.com" },
+            { id: "acct-2", label: "other@example.com" },
+          ];
+        case "list_onepassword_vaults_command":
+          return [
+            { id: "vault-1", label: "Private" },
+            { id: "vault-2", label: "Shared" },
+          ];
+        case "list_onepassword_items_command":
+          return [];
+        case "list_onepassword_fields_command":
+          return [];
+        default:
+          throw new Error(`Unexpected command: ${command}`);
+      }
+    });
+
+    const view = render();
+    await flushReact();
+
+    click(
+      view.container.querySelector<HTMLButtonElement>(
+        '[data-testid="view-tab-password-management"]',
+      ),
+    );
+    await flushReact();
+    await flushReact();
+
+    const accountOption = getPickerOption(
+      view.container,
+      "onepassword-account-picker",
+      "acct-1",
+    );
+    expect(accountOption).not.toBeNull();
+
+    click(accountOption);
+    await flushReact();
+    await flushReact();
+
+    expect(
+      getPickerOption(view.container, "onepassword-vault-picker", "vault-1"),
+    ).not.toBeNull();
+    expect(
+      tauri.invoke.mock.calls.filter(
+        ([command]) => command === "list_onepassword_vaults_command",
+      ),
+    ).toHaveLength(1);
+
+    click(accountOption);
+    await flushReact();
+
+    expect(
+      getPickerOption(view.container, "onepassword-vault-picker", "vault-1"),
+    ).not.toBeNull();
+    expect(
+      tauri.invoke.mock.calls.filter(
+        ([command]) => command === "list_onepassword_vaults_command",
+      ),
+    ).toHaveLength(1);
+
+    view.unmount();
+  });
+
   it("renders picker-first import controls for all password source types", async () => {
     tauri.listen.mockImplementation(async () => tauri.unlisten);
     tauri.invoke.mockImplementation(async (command: string) => {

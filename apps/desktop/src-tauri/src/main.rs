@@ -16,6 +16,7 @@ use plankton_core::{
 };
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, Listener, Manager, Runtime, State};
+use tokio::task;
 use url::Url;
 
 const DEEP_LINK_EVENT: &str = "deep-link://new-url";
@@ -125,6 +126,17 @@ fn extract_handoff_request_id(argv: &[String]) -> Option<String> {
     None
 }
 
+async fn run_import_browse_task<T, F>(task_fn: F) -> Result<T, String>
+where
+    T: Send + 'static,
+    F: FnOnce() -> Result<T> + Send + 'static,
+{
+    task::spawn_blocking(task_fn)
+        .await
+        .map_err(|error| format!("import browse task failed: {error}"))?
+        .map_err(|error| error.to_string())
+}
+
 fn store_pending_handoff_request<R: Runtime>(app: &AppHandle<R>, request_id: &str) {
     if let Some(state) = app.try_state::<AppState>() {
         if let Ok(mut pending) = state.pending_handoff_request_id.lock() {
@@ -220,32 +232,36 @@ async fn import_secret_source(spec: SecretImportSpec) -> Result<ImportedSecretRe
 }
 
 #[tauri::command]
-fn list_onepassword_accounts_command() -> Result<Vec<ImportPickerOption>, String> {
-    list_onepassword_accounts().map_err(|error| error.to_string())
+async fn list_onepassword_accounts_command() -> Result<Vec<ImportPickerOption>, String> {
+    run_import_browse_task(list_onepassword_accounts).await
 }
 
 #[tauri::command]
-fn list_onepassword_vaults_command(account_id: String) -> Result<Vec<ImportPickerOption>, String> {
-    list_onepassword_vaults(account_id.as_str()).map_err(|error| error.to_string())
+async fn list_onepassword_vaults_command(
+    account_id: String,
+) -> Result<Vec<ImportPickerOption>, String> {
+    run_import_browse_task(move || list_onepassword_vaults(account_id.as_str())).await
 }
 
 #[tauri::command]
-fn list_onepassword_items_command(
+async fn list_onepassword_items_command(
     account_id: String,
     vault_id: String,
 ) -> Result<Vec<ImportPickerOption>, String> {
-    list_onepassword_items(account_id.as_str(), vault_id.as_str())
-        .map_err(|error| error.to_string())
+    run_import_browse_task(move || list_onepassword_items(account_id.as_str(), vault_id.as_str()))
+        .await
 }
 
 #[tauri::command]
-fn list_onepassword_fields_command(
+async fn list_onepassword_fields_command(
     account_id: String,
     vault_id: String,
     item_id: String,
 ) -> Result<Vec<ImportFieldOption>, String> {
-    list_onepassword_fields(account_id.as_str(), vault_id.as_str(), item_id.as_str())
-        .map_err(|error| error.to_string())
+    run_import_browse_task(move || {
+        list_onepassword_fields(account_id.as_str(), vault_id.as_str(), item_id.as_str())
+    })
+    .await
 }
 
 #[tauri::command]
