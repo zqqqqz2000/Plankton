@@ -138,3 +138,65 @@ export type DesktopSettings = {
   acp_codex_args: string;
   acp_timeout_secs: number;
 };
+
+export type OnePasswordCliLocator = {
+  provider_kind: "1password_cli";
+  account: string;
+  vault: string;
+  item: string;
+  field: string;
+  vault_id?: string | null;
+  item_id?: string | null;
+  field_id?: string | null;
+};
+
+export type BitwardenCliLocator = {
+  provider_kind: "bitwarden_cli";
+  account: string;
+  organization?: string | null;
+  collection?: string | null;
+  folder?: string | null;
+  item: string;
+  field: string;
+  item_id?: string | null;
+};
+
+export type DotenvFileLocator = {
+  provider_kind: "dotenv_file";
+  file_path: string;
+  namespace?: string | null;
+  prefix?: string | null;
+  key: string;
+};
+
+export type SecretSourceLocator =
+  | OnePasswordCliLocator
+  | BitwardenCliLocator
+  | DotenvFileLocator;
+
+export type SecretImportSpec = {
+  resource: string;
+  display_name: string | null;
+  description: string | null;
+  tags: string[];
+  source_locator: SecretSourceLocator;
+};
+
+type ImportedSecretReferenceBase = {
+  resource: string;
+  display_name: string;
+  description?: string | null;
+  tags: string[];
+  imported_at: string;
+  last_verified_at?: string | null;
+};
+
+export type ImportedSecretReference =
+  | (ImportedSecretReferenceBase & OnePasswordCliLocator)
+  | (ImportedSecretReferenceBase & BitwardenCliLocator)
+  | (ImportedSecretReferenceBase & DotenvFileLocator);
+
+export type ImportedSecretReceipt = {
+  catalog_path: string;
+  reference: ImportedSecretReference;
+};

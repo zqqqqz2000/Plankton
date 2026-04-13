@@ -28,7 +28,7 @@ export function deriveTraceProviderKind(
   providerTrace: ProviderTrace | null,
 ): string | null {
   if (providerKind) {
-    return providerKind;
+    return providerKind === "acp_codex" ? "acp" : providerKind;
   }
 
   if (!providerTrace) {
@@ -39,7 +39,7 @@ export function deriveTraceProviderKind(
     providerTrace.package_name === "@zed-industries/codex-acp" ||
     providerTrace.transport === "stdio"
   ) {
-    return "acp_codex";
+    return "acp";
   }
 
   if (providerTrace.protocol === "anthropic_messages") {

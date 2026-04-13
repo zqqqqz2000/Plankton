@@ -3697,7 +3697,7 @@ checksum = "b4596b6d070b27117e987119b4dac604f3c58cfb0b191112e24771b2faeac1a6"
 
 [[package]]
 name = "plankton"
-version = "0.1.0"
+version = "0.1.10"
 dependencies = [
  "anyhow",
  "chrono",
@@ -3714,7 +3714,7 @@ dependencies = [
 
 [[package]]
 name = "plankton-core"
-version = "0.1.0"
+version = "0.1.10"
 dependencies = [
  "agent-client-protocol",
  "async-openai",
@@ -3723,6 +3723,7 @@ dependencies = [
  "clap",
  "config",
  "directories",
+ "dotenvy",
  "futures",
  "minijinja",
  "reqwest 0.12.28",
@@ -3742,7 +3743,7 @@ dependencies = [
 
 [[package]]
 name = "plankton-desktop"
-version = "0.1.0"
+version = "0.1.10"
 dependencies = [
  "anyhow",
  "plankton-core",
@@ -3762,7 +3763,7 @@ dependencies = [
 
 [[package]]
 name = "plankton-store"
-version = "0.1.0"
+version = "0.1.10"
 dependencies = [
  "chrono",
  "plankton-core",

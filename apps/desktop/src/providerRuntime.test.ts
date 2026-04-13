@@ -8,7 +8,7 @@ import {
 describe("providerRuntime", () => {
   it("treats ACP trace metadata as an active ACP provider", () => {
     const summary = buildProviderRuntimeSummary({
-      configuredProviderKind: "acp_codex",
+      configuredProviderKind: "acp",
       actualProviderKind: null,
       providerCalled: true,
       providerTrace: {
@@ -27,13 +27,13 @@ describe("providerRuntime", () => {
       },
     });
 
-    expect(summary.actualProviderKind).toBe("acp_codex");
+    expect(summary.actualProviderKind).toBe("acp");
     expect(summary.state).toBe("active");
   });
 
   it("reports configured ACP as not called when the request never reached a provider", () => {
     const summary = buildProviderRuntimeSummary({
-      configuredProviderKind: "acp_codex",
+      configuredProviderKind: "acp",
       actualProviderKind: null,
       providerCalled: false,
       providerTrace: null,
@@ -44,7 +44,7 @@ describe("providerRuntime", () => {
 
   it("reports runtime override when the configured provider and actual provider differ", () => {
     const summary = buildProviderRuntimeSummary({
-      configuredProviderKind: "acp_codex",
+      configuredProviderKind: "acp",
       actualProviderKind: "claude",
       providerCalled: true,
       providerTrace: {
@@ -84,5 +84,9 @@ describe("providerRuntime", () => {
         beta_headers: [],
       }),
     ).toBe("claude");
+  });
+
+  it("upgrades legacy acp_codex provider kinds to generic acp", () => {
+    expect(deriveTraceProviderKind("acp_codex", null)).toBe("acp");
   });
 });

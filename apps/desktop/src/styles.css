@@ -87,6 +87,20 @@ button:disabled {
   flex-wrap: wrap;
 }
 
+.toolbar-title {
+  display: grid;
+  gap: var(--space-2);
+}
+
+.toolbar-heading,
+.toolbar-nav,
+.password-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+}
+
 .toolbar-actions {
   margin-left: auto;
 }
@@ -366,6 +380,89 @@ button:disabled {
 .locale-button.active {
   background: var(--color-text);
   color: var(--color-inverse);
+}
+
+.toolbar-nav {
+  border: var(--border-width) solid var(--color-line);
+}
+
+.toolbar-tab {
+  min-width: 148px;
+  border: none;
+  border-left: var(--border-width) solid var(--color-line);
+}
+
+.toolbar-tab:first-child {
+  border-left: none;
+}
+
+.toolbar-tab.active {
+  background: var(--color-text);
+  color: var(--color-inverse);
+}
+
+.password-panel {
+  display: grid;
+  gap: var(--space-2);
+}
+
+.password-layout {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--space-2);
+}
+
+.provider-option-list {
+  display: grid;
+  gap: var(--space-2);
+  margin-top: var(--space-2);
+}
+
+.provider-option {
+  display: grid;
+  gap: var(--space-1);
+  justify-items: start;
+  width: 100%;
+  padding: var(--space-2);
+  border: var(--border-width) solid var(--color-line);
+  background: var(--color-surface);
+  text-align: left;
+}
+
+.provider-option strong {
+  font-size: 0.8rem;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.provider-option p {
+  margin: 0;
+  font-size: 0.78rem;
+  line-height: 1.45;
+  color: var(--color-text-muted);
+}
+
+.provider-option.active {
+  background: var(--color-surface-muted);
+}
+
+.field-optional,
+.field-hint {
+  color: var(--color-text-muted);
+  font-size: 0.72rem;
+}
+
+.boundary-list {
+  display: grid;
+  gap: var(--space-1);
+  margin: 0;
+  padding-left: 18px;
+  font-size: 0.78rem;
+  line-height: 1.45;
+}
+
+.password-actions {
+  justify-content: flex-start;
 }
 
 .modal-backdrop {
@@ -754,7 +851,8 @@ button:disabled {
 
 @media (max-width: 1120px) {
   .workspace-grid,
-  .detail-grid {
+  .detail-grid,
+  .password-layout {
     grid-template-columns: 1fr;
   }
 

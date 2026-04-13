@@ -16,7 +16,9 @@ describe("i18n", () => {
     expect(translateCode("zh-CN", "manual_only")).toBe("人工审批");
   });
 
-  it("treats acp_codex as ACP in user-facing labels", () => {
+  it("treats ACP provider codes as ACP in user-facing labels", () => {
+    expect(translateCode("en", "acp")).toBe("ACP");
+    expect(translateCode("zh-CN", "acp")).toBe("ACP");
     expect(translateCode("en", "acp_codex")).toBe("ACP");
     expect(translateCode("zh-CN", "acp_codex")).toBe("ACP");
   });
