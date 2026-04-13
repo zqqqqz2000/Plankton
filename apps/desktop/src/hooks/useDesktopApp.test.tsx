@@ -556,6 +556,181 @@ describe("useDesktopApp runtime wiring", () => {
     view.unmount();
   });
 
+  it("submits 1Password imports with stable account and field identifiers", async () => {
+    tauri.listen.mockImplementation(async () => tauri.unlisten);
+    tauri.invoke.mockImplementation(async (command: string) => {
+      switch (command) {
+        case "dashboard":
+          return DASHBOARD;
+        case "desktop_settings":
+          return SETTINGS;
+        case "consume_handoff_request":
+          return null;
+        case "list_onepassword_accounts_command":
+          return [
+            {
+              id: "acct-1",
+              label: "demo@example.com",
+              subtitle: "example.1password.com",
+            },
+            {
+              id: "acct-2",
+              label: "other@example.com",
+              subtitle: "other.1password.com",
+            },
+          ];
+        case "list_onepassword_vaults_command":
+          return [
+            { id: "vault-1", label: "Private" },
+            { id: "vault-2", label: "Shared" },
+          ];
+        case "list_onepassword_items_command":
+          return [
+            { id: "item-1", label: "Qq" },
+            { id: "item-2", label: "Github" },
+          ];
+        case "list_onepassword_fields_command":
+          return [
+            {
+              selector: "password",
+              label: "Password",
+              subtitle: "login.password",
+              field_id: "field-1",
+            },
+            {
+              selector: "username",
+              label: "Username",
+              subtitle: "login.username",
+              field_id: "field-2",
+            },
+          ];
+        case "import_secret_source":
+          return {
+            catalog_path: "catalog/password/op/password",
+            reference: {
+              provider_kind: "1password_cli",
+              resource: "secret/op/password",
+              display_name: "Qq:Password",
+              description: null,
+              tags: ["prod"],
+              imported_at: "2026-04-13T05:12:00.000Z",
+              last_verified_at: null,
+              account: "demo@example.com",
+              account_id: "acct-1",
+              vault: "Private",
+              vault_id: "vault-1",
+              item: "Qq",
+              item_id: "item-1",
+              field: "password",
+              field_id: "field-1",
+            },
+          };
+        default:
+          throw new Error(`Unexpected command: ${command}`);
+      }
+    });
+
+    const view = render();
+    await flushReact();
+
+    click(
+      view.container.querySelector<HTMLButtonElement>(
+        '[data-testid="view-tab-password-management"]',
+      ),
+    );
+    await flushReact();
+    await flushReact();
+
+    expect(
+      getPickerOption(view.container, "onepassword-account-picker", "acct-1"),
+    ).not.toBeNull();
+    click(
+      getPickerOption(view.container, "onepassword-account-picker", "acct-1"),
+    );
+    await flushReact();
+    await flushReact();
+
+    expect(
+      getPickerOption(view.container, "onepassword-vault-picker", "vault-1"),
+    ).not.toBeNull();
+    click(
+      getPickerOption(view.container, "onepassword-vault-picker", "vault-1"),
+    );
+    await flushReact();
+    await flushReact();
+
+    expect(
+      getPickerOption(view.container, "onepassword-item-picker", "item-1"),
+    ).not.toBeNull();
+    click(getPickerOption(view.container, "onepassword-item-picker", "item-1"));
+    await flushReact();
+    await flushReact();
+
+    expect(
+      getPickerOption(view.container, "onepassword-field-picker", "field-1"),
+    ).not.toBeNull();
+    click(
+      getPickerOption(view.container, "onepassword-field-picker", "field-1"),
+    );
+    await flushReact();
+
+    setFieldValue(
+      view.container.querySelector<HTMLInputElement>(
+        '[data-testid="password-field-resource"] input',
+      ),
+      "secret/op/password",
+    );
+    setFieldValue(
+      view.container.querySelector<HTMLInputElement>(
+        '[data-testid="password-field-tags"] input',
+      ),
+      "prod",
+    );
+    await flushReact();
+
+    await clickAsync(
+      view.container.querySelector<HTMLButtonElement>(
+        '[data-testid="password-import-submit"]',
+      ),
+    );
+    await flushReact();
+
+    const importCall = tauri.invoke.mock.calls.find(
+      ([command]) => command === "import_secret_source",
+    );
+    expect(importCall).toBeDefined();
+    expect(importCall?.[1]).toEqual({
+      spec: {
+        resource: "secret/op/password",
+        display_name: "Qq",
+        description: null,
+        tags: ["prod"],
+        source_locator: {
+          provider_kind: "1password_cli",
+          account: "demo@example.com",
+          account_id: "acct-1",
+          vault: "Private",
+          vault_id: "vault-1",
+          item: "Qq",
+          item_id: "item-1",
+          field: "password",
+          field_id: "field-1",
+        },
+      },
+    });
+
+    expect(
+      view.container.querySelector('[data-testid="password-import-receipt"]'),
+    ).not.toBeNull();
+    expect(
+      view.container.querySelector(
+        '[data-testid="password-import-notice-message"]',
+      )?.textContent,
+    ).toBe("Imported secret/op/password");
+
+    view.unmount();
+  });
+
   it("renders picker-first import controls for all password source types", async () => {
     tauri.listen.mockImplementation(async () => tauri.unlisten);
     tauri.invoke.mockImplementation(async (command: string) => {

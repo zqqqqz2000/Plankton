@@ -30,6 +30,7 @@ type CommonImportDraft = {
 
 type OnePasswordDraft = {
   account: string;
+  accountId: string;
   vault: string;
   item: string;
   field: string;
@@ -128,6 +129,7 @@ const EMPTY_COMMON_DRAFT: CommonImportDraft = {
 
 const EMPTY_ONEPASSWORD_DRAFT: OnePasswordDraft = {
   account: "",
+  accountId: "",
   vault: "",
   item: "",
   field: "",
@@ -209,6 +211,7 @@ function buildSourceLocator(
     return {
       provider_kind: "1password_cli",
       account: onePasswordDraft.account.trim(),
+      account_id: optionalValue(onePasswordDraft.accountId),
       vault: onePasswordDraft.vault.trim(),
       item: onePasswordDraft.item.trim(),
       field: onePasswordDraft.field.trim(),
@@ -644,6 +647,7 @@ export function PasswordManagementView(
     setOnePasswordDraft((current) => ({
       ...current,
       account: nextAccount?.label ?? current.account,
+      accountId: nextAccount?.id ?? current.accountId,
       vault: "",
       item: "",
       field: "",

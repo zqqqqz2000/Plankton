@@ -86,6 +86,8 @@ pub enum SecretSourceLocator {
     #[serde(rename = "1password_cli")]
     OnePasswordCli {
         account: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        account_id: Option<String>,
         vault: String,
         item: String,
         field: String,
@@ -613,6 +615,7 @@ fn resolve_imported_reference(
     match &reference.source_locator {
         SecretSourceLocator::OnePasswordCli {
             account,
+            account_id,
             vault,
             item,
             field,
@@ -623,6 +626,7 @@ fn resolve_imported_reference(
             programs.onepassword.as_path(),
             OnePasswordCliLocator {
                 account,
+                account_id: account_id.as_deref(),
                 vault,
                 item,
                 field,
@@ -664,6 +668,7 @@ fn resolve_imported_reference(
 
 struct OnePasswordCliLocator<'a> {
     account: &'a str,
+    account_id: Option<&'a str>,
     vault: &'a str,
     item: &'a str,
     field: &'a str,
@@ -690,6 +695,7 @@ fn resolve_onepassword_reference(
     }
 
     let item_selector = locator.item_id.unwrap_or(locator.item);
+    let account_selector = locator.account_id.unwrap_or(locator.account);
     let vault_selector = locator.vault_id.unwrap_or(locator.vault);
     let args = vec![
         "item".to_string(),
@@ -700,7 +706,7 @@ fn resolve_onepassword_reference(
         "--format".to_string(),
         "json".to_string(),
         "--account".to_string(),
-        locator.account.to_string(),
+        account_selector.to_string(),
     ];
     let stdout =
         run_command_capture_stdout(program, &args, ONEPASSWORD_CLI_PROVIDER_KIND, resource)?;
@@ -773,7 +779,7 @@ fn resolve_onepassword_reference(
             "read".to_string(),
             reference.to_string(),
             "--account".to_string(),
-            locator.account.to_string(),
+            account_selector.to_string(),
         ];
         let stdout = run_command_capture_stdout(
             program,
@@ -1250,7 +1256,23 @@ mod tests {
         write_executable(
             op_path.as_path(),
             r#"#!/bin/sh
-if [ "$1" = "item" ] && [ "$2" = "get" ]; then
+cmd1="$1"
+cmd2="$2"
+account=""
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = "--account" ]; then
+    account="$2"
+    break
+  fi
+  shift
+done
+
+if [ "$account" != "acct-1" ]; then
+  echo "expected --account acct-1, got $account" >&2
+  exit 1
+fi
+
+if [ "$cmd1" = "item" ] && [ "$cmd2" = "get" ]; then
   cat <<'JSON'
 {"fields":[{"label":"password","value":"op-secret"}],"notesPlain":"op notes"}
 JSON
@@ -1270,7 +1292,8 @@ exit 1
                 description: None,
                 tags: Vec::new(),
                 source_locator: SecretSourceLocator::OnePasswordCli {
-                    account: "personal".to_string(),
+                    account: "demo@example.com".to_string(),
+                    account_id: Some("acct-1".to_string()),
                     vault: "Engineering".to_string(),
                     item: "API Token".to_string(),
                     field: "password".to_string(),

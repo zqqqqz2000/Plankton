@@ -142,6 +142,7 @@ export type DesktopSettings = {
 export type OnePasswordCliLocator = {
   provider_kind: "1password_cli";
   account: string;
+  account_id?: string | null;
   vault: string;
   item: string;
   field: string;

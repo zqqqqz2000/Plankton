@@ -7,7 +7,7 @@
     "type": "git",
     "url": "git+https://github.com/zqqqqz2000/Plankton.git"
   },
-  "version": "0.1.11",
+  "version": "0.1.12",
   "type": "module",
   "scripts": {
     "dev": "vite",
