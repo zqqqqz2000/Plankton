@@ -46,6 +46,8 @@ pub use template::{
     REQUEST_TEMPLATE_ID, REQUEST_TEMPLATE_VERSION,
 };
 pub use value_resolver::{
-    default_value_resolver, local_secret_catalog_path, LocalSecretCatalogResolver, ValueResolver,
-    ValueResolverError,
+    default_value_resolver, import_secret_reference, local_secret_catalog_path,
+    ImportedSecretReceipt, ImportedSecretReference, LocalSecretCatalogResolver, SecretImportError,
+    SecretImportSpec, SecretSourceLocator, ValueResolver, ValueResolverError,
+    BITWARDEN_CLI_PROVIDER_KIND, DOTENV_FILE_PROVIDER_KIND, ONEPASSWORD_CLI_PROVIDER_KIND,
 };

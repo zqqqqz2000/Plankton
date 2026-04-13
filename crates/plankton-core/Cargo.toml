@@ -14,6 +14,7 @@ async-trait.workspace = true
 chrono.workspace = true
 config.workspace = true
 directories.workspace = true
+dotenvy.workspace = true
 futures = "0.3"
 minijinja.workspace = true
 reqwest.workspace = true
