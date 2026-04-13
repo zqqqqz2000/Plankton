@@ -569,12 +569,12 @@ describe("useDesktopApp runtime wiring", () => {
         case "list_onepassword_accounts_command":
           return [
             {
-              id: "acct-1",
+              id: "example.1password.com",
               label: "demo@example.com",
               subtitle: "example.1password.com",
             },
             {
-              id: "acct-2",
+              id: "other.1password.com",
               label: "other@example.com",
               subtitle: "other.1password.com",
             },
@@ -616,7 +616,7 @@ describe("useDesktopApp runtime wiring", () => {
               imported_at: "2026-04-13T05:12:00.000Z",
               last_verified_at: null,
               account: "demo@example.com",
-              account_id: "acct-1",
+              account_id: "example.1password.com",
               vault: "Private",
               vault_id: "vault-1",
               item: "Qq",
@@ -642,10 +642,18 @@ describe("useDesktopApp runtime wiring", () => {
     await flushReact();
 
     expect(
-      getPickerOption(view.container, "onepassword-account-picker", "acct-1"),
+      getPickerOption(
+        view.container,
+        "onepassword-account-picker",
+        "example.1password.com",
+      ),
     ).not.toBeNull();
     click(
-      getPickerOption(view.container, "onepassword-account-picker", "acct-1"),
+      getPickerOption(
+        view.container,
+        "onepassword-account-picker",
+        "example.1password.com",
+      ),
     );
     await flushReact();
     await flushReact();
@@ -708,7 +716,7 @@ describe("useDesktopApp runtime wiring", () => {
         source_locator: {
           provider_kind: "1password_cli",
           account: "demo@example.com",
-          account_id: "acct-1",
+          account_id: "example.1password.com",
           vault: "Private",
           vault_id: "vault-1",
           item: "Qq",
@@ -743,8 +751,8 @@ describe("useDesktopApp runtime wiring", () => {
           return null;
         case "list_onepassword_accounts_command":
           return [
-            { id: "acct-1", label: "demo@example.com" },
-            { id: "acct-2", label: "other@example.com" },
+            { id: "example.1password.com", label: "demo@example.com" },
+            { id: "other.1password.com", label: "other@example.com" },
           ];
         case "list_onepassword_vaults_command":
           return [
@@ -774,7 +782,7 @@ describe("useDesktopApp runtime wiring", () => {
     const accountOption = getPickerOption(
       view.container,
       "onepassword-account-picker",
-      "acct-1",
+      "example.1password.com",
     );
     expect(accountOption).not.toBeNull();
 
@@ -817,7 +825,7 @@ describe("useDesktopApp runtime wiring", () => {
         case "consume_handoff_request":
           return null;
         case "list_onepassword_accounts_command":
-          return [{ id: "acct-1", label: "Personal" }];
+          return [{ id: "personal.1password.com", label: "Personal" }];
         case "list_onepassword_vaults_command":
           return [{ id: "vault-1", label: "Engineering" }];
         case "list_onepassword_items_command":

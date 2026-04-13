@@ -9,6 +9,7 @@ use anyhow::{anyhow, Context, Result};
 use dotenvy::from_path_iter;
 use serde::Serialize;
 use serde_json::Value;
+use url::Url;
 
 const ALL_CONTAINERS_ID: &str = "all";
 
@@ -153,15 +154,19 @@ fn list_onepassword_accounts_with_program(program: &Path) -> Result<Vec<ImportPi
         .map(|(index, account)| {
             let email = string_field(account, "email");
             let url = string_field(account, "url");
+            let normalized_url = url
+                .as_deref()
+                .and_then(normalize_onepassword_account_selector);
             let label = email
                 .clone()
-                .or(url.clone())
+                .or(normalized_url.clone())
                 .unwrap_or_else(|| format!("Account {}", index + 1));
-            let id = string_field(account, "account_uuid")
+            let id = normalized_url
+                .clone()
                 .or(email.clone())
-                .or(url.clone())
+                .or(string_field(account, "account_uuid"))
                 .unwrap_or_else(|| label.clone());
-            let subtitle = match (email, url) {
+            let subtitle = match (email, normalized_url) {
                 (Some(email), Some(_url)) if label != email => Some(email),
                 (Some(_email), Some(url)) if label != url => Some(url),
                 (Some(email), None) if label != email => Some(email),
@@ -176,6 +181,18 @@ fn list_onepassword_accounts_with_program(program: &Path) -> Result<Vec<ImportPi
             }
         })
         .collect())
+}
+
+fn normalize_onepassword_account_selector(value: &str) -> Option<String> {
+    let trimmed = value.trim().trim_end_matches('/');
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    Url::parse(trimmed)
+        .ok()
+        .and_then(|url| url.host_str().map(ToOwned::to_owned))
+        .or_else(|| Some(trimmed.to_string()))
 }
 
 fn list_onepassword_vaults_with_program(
@@ -683,18 +700,30 @@ JSON
   exit 0
 fi
 if [ "$1" = "vault" ] && [ "$2" = "list" ]; then
+  if [ "$4" != "example.1password.com" ]; then
+    echo "unexpected vault account selector: $4" >&2
+    exit 1
+  fi
   cat <<'JSON'
 [{"id":"vault-1","name":"Engineering"}]
 JSON
   exit 0
 fi
 if [ "$1" = "item" ] && [ "$2" = "list" ]; then
+  if [ "$4" != "example.1password.com" ]; then
+    echo "unexpected item list account selector: $4" >&2
+    exit 1
+  fi
   cat <<'JSON'
 [{"id":"item-1","title":"API Token","vault":{"id":"vault-1","name":"Engineering"},"additional_information":"service credentials"}]
 JSON
   exit 0
 fi
 if [ "$1" = "item" ] && [ "$2" = "get" ]; then
+  if [ "$5" != "example.1password.com" ]; then
+    echo "unexpected item get account selector: $5" >&2
+    exit 1
+  fi
   cat <<'JSON'
 {"notesPlain":"note body","fields":[{"id":"field-1","type":"CONCEALED","purpose":"PASSWORD","label":"password","value":"secret","reference":"op://vault/item/password"}]}
 JSON
@@ -707,15 +736,29 @@ exit 1
 
         let accounts =
             list_onepassword_accounts_with_program(op_path.as_path()).expect("account list works");
-        let vaults = list_onepassword_vaults_with_program(op_path.as_path(), "acct-1")
-            .expect("vault list works");
-        let items = list_onepassword_items_with_program(op_path.as_path(), "acct-1", "vault-1")
-            .expect("item list works");
-        let fields =
-            list_onepassword_fields_with_program(op_path.as_path(), "acct-1", "vault-1", "item-1")
-                .expect("field list works");
+        let vaults =
+            list_onepassword_vaults_with_program(op_path.as_path(), "example.1password.com")
+                .expect("vault list works");
+        let items = list_onepassword_items_with_program(
+            op_path.as_path(),
+            "example.1password.com",
+            "vault-1",
+        )
+        .expect("item list works");
+        let fields = list_onepassword_fields_with_program(
+            op_path.as_path(),
+            "example.1password.com",
+            "vault-1",
+            "item-1",
+        )
+        .expect("field list works");
 
         assert_eq!(accounts[0].label, "demo@example.com");
+        assert_eq!(accounts[0].id, "example.1password.com");
+        assert_eq!(
+            accounts[0].subtitle.as_deref(),
+            Some("example.1password.com")
+        );
         assert_eq!(vaults[0].label, "Engineering");
         assert_eq!(items[0].label, "API Token");
         assert_eq!(fields[0].selector, "notes");
