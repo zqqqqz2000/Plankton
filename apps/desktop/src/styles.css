@@ -465,6 +465,52 @@ button:disabled {
   justify-content: flex-start;
 }
 
+.imported-catalog-layout {
+  display: grid;
+  grid-template-columns: minmax(280px, 0.9fr) minmax(0, 1.1fr);
+  gap: var(--space-2);
+  align-items: start;
+}
+
+.imported-search-input {
+  max-width: 420px;
+}
+
+.imported-tree-list {
+  display: grid;
+  gap: var(--space-1);
+  margin: 0;
+  padding-left: 18px;
+  list-style: none;
+}
+
+.imported-tree-node {
+  display: grid;
+  gap: var(--space-1);
+}
+
+.imported-tree-branch {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+  padding: 6px var(--space-2);
+  border: var(--border-width) solid var(--color-line);
+  border-radius: var(--radius-sm);
+  background: var(--color-surface-muted);
+}
+
+.imported-tree-leaf {
+  border: var(--border-width) solid var(--color-line);
+  border-radius: var(--radius-sm);
+}
+
+.imported-tag-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-1);
+}
+
 .modal-backdrop {
   position: fixed;
   inset: 0;
@@ -852,7 +898,8 @@ button:disabled {
 @media (max-width: 1120px) {
   .workspace-grid,
   .detail-grid,
-  .password-layout {
+  .password-layout,
+  .imported-catalog-layout {
     grid-template-columns: 1fr;
   }
 

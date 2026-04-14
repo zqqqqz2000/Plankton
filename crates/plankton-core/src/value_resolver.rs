@@ -1,5 +1,5 @@
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     env, fs,
     path::{Path, PathBuf},
     process::Command,
@@ -8,6 +8,7 @@ use std::{
 use chrono::{DateTime, Utc};
 use directories::ProjectDirs;
 use dotenvy::from_path_iter;
+use minijinja::{Environment, UndefinedBehavior};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -15,6 +16,10 @@ const LOCAL_SECRET_CATALOG_RESOLVER_KIND: &str = "local_secret_catalog";
 pub const ONEPASSWORD_CLI_PROVIDER_KIND: &str = "1password_cli";
 pub const BITWARDEN_CLI_PROVIDER_KIND: &str = "bitwarden_cli";
 pub const DOTENV_FILE_PROVIDER_KIND: &str = "dotenv_file";
+const DEFAULT_ONEPASSWORD_RESOURCE_TEMPLATE: &str =
+    "secret/{{ account }}/{{ vault }}/{{ item }}/{{ field }}";
+const DEFAULT_BITWARDEN_RESOURCE_TEMPLATE: &str = "secret/{{ container }}/{{ item }}/{{ field }}";
+const DEFAULT_DOTENV_RESOURCE_TEMPLATE: &str = "secret/{{ source_name }}/{{ key }}";
 
 const SECRET_CATALOG_BOOTSTRAP_TEMPLATE: &str = r#"# Plankton local secret catalog
 # Map resource identifiers either to literal secret values or to imported source locators.
@@ -48,7 +53,16 @@ pub struct SecretImportSpec {
     pub display_name: Option<String>,
     pub description: Option<String>,
     pub tags: Vec<String>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub metadata: BTreeMap<String, String>,
     pub source_locator: SecretSourceLocator,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SecretImportBatchSpec {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resource_template: Option<String>,
+    pub imports: Vec<SecretImportSpec>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -59,6 +73,8 @@ pub struct ImportedSecretReference {
     pub description: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tags: Vec<String>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub metadata: BTreeMap<String, String>,
     #[serde(flatten)]
     pub source_locator: SecretSourceLocator,
     pub imported_at: DateTime<Utc>,
@@ -173,12 +189,148 @@ impl SecretSourceLocator {
             Self::DotenvFile { key, .. } => key.clone(),
         }
     }
+
+    fn default_resource_template(&self) -> &'static str {
+        match self {
+            Self::OnePasswordCli { .. } => DEFAULT_ONEPASSWORD_RESOURCE_TEMPLATE,
+            Self::BitwardenCli { .. } => DEFAULT_BITWARDEN_RESOURCE_TEMPLATE,
+            Self::DotenvFile { .. } => DEFAULT_DOTENV_RESOURCE_TEMPLATE,
+        }
+    }
+
+    fn resource_template_context(&self) -> BTreeMap<String, String> {
+        let mut context = BTreeMap::from([(
+            "provider_kind".to_string(),
+            self.provider_kind().to_string(),
+        )]);
+
+        match self {
+            Self::OnePasswordCli {
+                account,
+                account_id,
+                vault,
+                item,
+                field,
+                vault_id,
+                item_id,
+                field_id,
+            } => {
+                context.insert("account".to_string(), account.clone());
+                context.insert("vault".to_string(), vault.clone());
+                context.insert("container".to_string(), vault.clone());
+                context.insert("item".to_string(), item.clone());
+                context.insert("field".to_string(), field.clone());
+                if let Some(account_id) = account_id.clone() {
+                    context.insert("account_id".to_string(), account_id);
+                }
+                if let Some(vault_id) = vault_id.clone() {
+                    context.insert("vault_id".to_string(), vault_id);
+                }
+                if let Some(item_id) = item_id.clone() {
+                    context.insert("item_id".to_string(), item_id);
+                }
+                if let Some(field_id) = field_id.clone() {
+                    context.insert("field_id".to_string(), field_id);
+                }
+            }
+            Self::BitwardenCli {
+                account,
+                organization,
+                collection,
+                folder,
+                item,
+                field,
+                item_id,
+            } => {
+                context.insert("account".to_string(), account.clone());
+                context.insert(
+                    "container".to_string(),
+                    collection
+                        .clone()
+                        .or_else(|| folder.clone())
+                        .or_else(|| organization.clone())
+                        .unwrap_or_else(|| account.clone()),
+                );
+                context.insert("item".to_string(), item.clone());
+                context.insert("field".to_string(), field.clone());
+                if let Some(organization) = organization.clone() {
+                    context.insert("organization".to_string(), organization);
+                }
+                if let Some(collection) = collection.clone() {
+                    context.insert("collection".to_string(), collection);
+                }
+                if let Some(folder) = folder.clone() {
+                    context.insert("folder".to_string(), folder);
+                }
+                if let Some(item_id) = item_id.clone() {
+                    context.insert("item_id".to_string(), item_id);
+                }
+            }
+            Self::DotenvFile {
+                file_path,
+                namespace,
+                prefix,
+                key,
+            } => {
+                context.insert("file_path".to_string(), file_path.display().to_string());
+                context.insert("key".to_string(), key.clone());
+                if let Some(file_name) = file_path.file_name().and_then(|value| value.to_str()) {
+                    context.insert("file_name".to_string(), file_name.to_string());
+                }
+                if let Some(file_stem) = file_path.file_stem().and_then(|value| value.to_str()) {
+                    context.insert("file_stem".to_string(), file_stem.to_string());
+                }
+                if let Some(namespace) = namespace.clone() {
+                    context.insert("namespace".to_string(), namespace.clone());
+                    context
+                        .entry("source_name".to_string())
+                        .or_insert(namespace);
+                }
+                if let Some(prefix) = prefix.clone() {
+                    context.insert("prefix".to_string(), prefix.clone());
+                    context.entry("source_name".to_string()).or_insert(prefix);
+                }
+                if !context.contains_key("source_name") {
+                    let fallback = file_path
+                        .file_stem()
+                        .and_then(|value| value.to_str())
+                        .or_else(|| file_path.file_name().and_then(|value| value.to_str()))
+                        .unwrap_or("dotenv");
+                    context.insert("source_name".to_string(), fallback.to_string());
+                }
+            }
+        }
+
+        context
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ImportedSecretReceipt {
     pub catalog_path: PathBuf,
     pub reference: ImportedSecretReference,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ImportedSecretBatchReceipt {
+    pub catalog_path: PathBuf,
+    pub receipts: Vec<ImportedSecretReceipt>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ImportedSecretCatalog {
+    pub catalog_path: PathBuf,
+    pub imports: Vec<ImportedSecretReference>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ImportedSecretReferenceUpdate {
+    pub resource: String,
+    pub display_name: Option<String>,
+    pub description: Option<String>,
+    pub tags: Vec<String>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub metadata: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone)]
@@ -225,6 +377,14 @@ impl VendorCliPrograms {
 pub enum SecretImportError {
     #[error("resource key is required")]
     MissingResource,
+    #[error("batch import requires at least one source")]
+    EmptyBatch,
+    #[error("resource template is invalid: {message}")]
+    InvalidResourceTemplate { message: String },
+    #[error("resource template did not produce a valid resource identifier")]
+    InvalidGeneratedResource,
+    #[error("batch import generated duplicate resource identifier {resource}")]
+    DuplicateResource { resource: String },
     #[error("failed to load local secret catalog from {path}: {message}")]
     LoadCatalog { path: String, message: String },
     #[error("failed to serialize local secret catalog to {path}: {message}")]
@@ -237,6 +397,8 @@ pub enum SecretImportError {
         #[source]
         source: ValueResolverError,
     },
+    #[error("imported resource {resource} was not found in the local secret catalog")]
+    ImportedResourceNotFound { resource: String },
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -375,28 +537,220 @@ pub fn default_value_resolver() -> Result<LocalSecretCatalogResolver, ValueResol
 pub fn import_secret_reference(
     spec: SecretImportSpec,
 ) -> Result<ImportedSecretReceipt, SecretImportError> {
-    import_secret_reference_at(local_secret_catalog_path().as_path(), spec)
+    let receipt = import_secret_references_at(
+        local_secret_catalog_path().as_path(),
+        SecretImportBatchSpec {
+            resource_template: None,
+            imports: vec![spec],
+        },
+    )?;
+    receipt
+        .receipts
+        .into_iter()
+        .next()
+        .ok_or(SecretImportError::EmptyBatch)
 }
 
 pub fn import_secret_reference_at(
     path: &Path,
     spec: SecretImportSpec,
 ) -> Result<ImportedSecretReceipt, SecretImportError> {
-    import_secret_reference_at_with_programs(path, spec, &VendorCliPrograms::from_env())
+    let receipt = import_secret_references_at(
+        path,
+        SecretImportBatchSpec {
+            resource_template: None,
+            imports: vec![spec],
+        },
+    )?;
+    receipt
+        .receipts
+        .into_iter()
+        .next()
+        .ok_or(SecretImportError::EmptyBatch)
 }
 
+pub fn import_secret_references(
+    spec: SecretImportBatchSpec,
+) -> Result<ImportedSecretBatchReceipt, SecretImportError> {
+    import_secret_references_at(local_secret_catalog_path().as_path(), spec)
+}
+
+pub fn import_secret_references_at(
+    path: &Path,
+    spec: SecretImportBatchSpec,
+) -> Result<ImportedSecretBatchReceipt, SecretImportError> {
+    import_secret_references_at_with_programs(path, spec, &VendorCliPrograms::from_env())
+}
+
+pub fn list_imported_secret_references() -> Result<ImportedSecretCatalog, SecretImportError> {
+    list_imported_secret_references_at(local_secret_catalog_path().as_path())
+}
+
+pub fn list_imported_secret_references_at(
+    path: &Path,
+) -> Result<ImportedSecretCatalog, SecretImportError> {
+    let mut catalog = load_secret_catalog_file_optional(path)?;
+    catalog
+        .imports
+        .sort_by(|left, right| left.resource.cmp(&right.resource));
+    Ok(ImportedSecretCatalog {
+        catalog_path: path.to_path_buf(),
+        imports: catalog.imports,
+    })
+}
+
+pub fn update_imported_secret_reference(
+    update: ImportedSecretReferenceUpdate,
+) -> Result<ImportedSecretReceipt, SecretImportError> {
+    update_imported_secret_reference_at(local_secret_catalog_path().as_path(), update)
+}
+
+pub fn update_imported_secret_reference_at(
+    path: &Path,
+    update: ImportedSecretReferenceUpdate,
+) -> Result<ImportedSecretReceipt, SecretImportError> {
+    let mut catalog = load_secret_catalog_file_optional(path)?;
+    let reference = catalog
+        .imports
+        .iter_mut()
+        .find(|reference| reference.resource == update.resource)
+        .ok_or_else(|| SecretImportError::ImportedResourceNotFound {
+            resource: update.resource.clone(),
+        })?;
+
+    reference.display_name = update
+        .display_name
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+        .unwrap_or_else(|| reference.source_locator.default_display_name());
+    reference.description = update
+        .description
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned);
+    reference.tags = sanitize_tags(update.tags);
+    reference.metadata = sanitize_metadata(update.metadata);
+
+    let updated = reference.clone();
+    save_secret_catalog_file(path, &catalog)?;
+
+    Ok(ImportedSecretReceipt {
+        catalog_path: path.to_path_buf(),
+        reference: updated,
+    })
+}
+
+pub fn delete_imported_secret_reference(resource: &str) -> Result<bool, SecretImportError> {
+    delete_imported_secret_reference_at(local_secret_catalog_path().as_path(), resource)
+}
+
+pub fn delete_imported_secret_reference_at(
+    path: &Path,
+    resource: &str,
+) -> Result<bool, SecretImportError> {
+    let mut catalog = load_secret_catalog_file_optional(path)?;
+    let next_len = catalog
+        .imports
+        .iter()
+        .filter(|reference| reference.resource != resource)
+        .count();
+
+    if next_len == catalog.imports.len() {
+        return Ok(false);
+    }
+
+    catalog
+        .imports
+        .retain(|reference| reference.resource != resource);
+    save_secret_catalog_file(path, &catalog)?;
+    Ok(true)
+}
+
+#[cfg(test)]
 fn import_secret_reference_at_with_programs(
     path: &Path,
     spec: SecretImportSpec,
     programs: &VendorCliPrograms,
 ) -> Result<ImportedSecretReceipt, SecretImportError> {
-    let mut catalog = load_secret_catalog_file_optional(path)?;
-    let now = Utc::now();
-    let resource = spec.resource.trim().to_string();
-    if resource.is_empty() {
-        return Err(SecretImportError::MissingResource);
+    let receipt = import_secret_references_at_with_programs(
+        path,
+        SecretImportBatchSpec {
+            resource_template: None,
+            imports: vec![spec],
+        },
+        programs,
+    )?;
+    receipt
+        .receipts
+        .into_iter()
+        .next()
+        .ok_or(SecretImportError::EmptyBatch)
+}
+
+fn import_secret_references_at_with_programs(
+    path: &Path,
+    spec: SecretImportBatchSpec,
+    programs: &VendorCliPrograms,
+) -> Result<ImportedSecretBatchReceipt, SecretImportError> {
+    if spec.imports.is_empty() {
+        return Err(SecretImportError::EmptyBatch);
     }
 
+    let mut catalog = load_secret_catalog_file_optional(path)?;
+    let now = Utc::now();
+
+    let mut references = Vec::with_capacity(spec.imports.len());
+    let mut seen_resources = BTreeSet::new();
+    for import in spec.imports {
+        let reference =
+            build_import_reference(import, spec.resource_template.as_deref(), now, programs)?;
+        if !seen_resources.insert(reference.resource.clone()) {
+            return Err(SecretImportError::DuplicateResource {
+                resource: reference.resource.clone(),
+            });
+        }
+        references.push(reference);
+    }
+
+    for reference in &references {
+        let resource = reference.resource.as_str();
+        catalog.secrets.remove(resource);
+        catalog.values.remove(resource);
+        if let Some(existing) = catalog
+            .imports
+            .iter_mut()
+            .find(|existing| existing.resource == resource)
+        {
+            *existing = reference.clone();
+        } else {
+            catalog.imports.push(reference.clone());
+        }
+    }
+
+    save_secret_catalog_file(path, &catalog)?;
+
+    Ok(ImportedSecretBatchReceipt {
+        catalog_path: path.to_path_buf(),
+        receipts: references
+            .into_iter()
+            .map(|reference| ImportedSecretReceipt {
+                catalog_path: path.to_path_buf(),
+                reference,
+            })
+            .collect(),
+    })
+}
+
+fn build_import_reference(
+    spec: SecretImportSpec,
+    resource_template: Option<&str>,
+    now: DateTime<Utc>,
+    programs: &VendorCliPrograms,
+) -> Result<ImportedSecretReference, SecretImportError> {
+    let resource = resolve_import_resource(&spec, resource_template)?;
     let display_name = spec
         .display_name
         .as_deref()
@@ -410,18 +764,15 @@ fn import_secret_reference_at_with_programs(
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(ToOwned::to_owned);
-    let tags = spec
-        .tags
-        .into_iter()
-        .map(|tag| tag.trim().to_string())
-        .filter(|tag| !tag.is_empty())
-        .collect::<Vec<_>>();
+    let tags = sanitize_tags(spec.tags);
+    let metadata = sanitize_metadata(spec.metadata);
 
     let mut reference = ImportedSecretReference {
         resource: resource.clone(),
         display_name,
         description,
         tags,
+        metadata,
         source_locator: spec.source_locator,
         imported_at: now,
         last_verified_at: None,
@@ -435,24 +786,118 @@ fn import_secret_reference_at_with_programs(
     })?;
     reference.last_verified_at = Some(now);
 
-    catalog.secrets.remove(resource.as_str());
-    catalog.values.remove(resource.as_str());
-    if let Some(existing) = catalog
-        .imports
-        .iter_mut()
-        .find(|existing| existing.resource == resource)
+    Ok(reference)
+}
+
+fn resolve_import_resource(
+    spec: &SecretImportSpec,
+    resource_template: Option<&str>,
+) -> Result<String, SecretImportError> {
+    if let Some(template) = resource_template
+        .map(str::trim)
+        .filter(|template| !template.is_empty())
     {
-        *existing = reference.clone();
-    } else {
-        catalog.imports.push(reference.clone());
+        return render_generated_resource(template, &spec.source_locator);
     }
 
-    save_secret_catalog_file(path, &catalog)?;
+    let explicit = spec.resource.trim();
+    if !explicit.is_empty() {
+        return Ok(explicit.to_string());
+    }
 
-    Ok(ImportedSecretReceipt {
-        catalog_path: path.to_path_buf(),
-        reference,
-    })
+    render_generated_resource(
+        spec.source_locator.default_resource_template(),
+        &spec.source_locator,
+    )
+}
+
+fn render_generated_resource(
+    template: &str,
+    source_locator: &SecretSourceLocator,
+) -> Result<String, SecretImportError> {
+    let mut environment = Environment::new();
+    environment.set_undefined_behavior(UndefinedBehavior::Strict);
+    let rendered = environment
+        .render_str(template, source_locator.resource_template_context())
+        .map_err(|error| SecretImportError::InvalidResourceTemplate {
+            message: error.to_string(),
+        })?;
+    normalize_generated_resource(&rendered).ok_or(SecretImportError::InvalidGeneratedResource)
+}
+
+fn normalize_generated_resource(value: &str) -> Option<String> {
+    let segments = value
+        .split('/')
+        .filter_map(normalize_generated_resource_segment)
+        .collect::<Vec<_>>();
+    (!segments.is_empty()).then(|| segments.join("/"))
+}
+
+fn normalize_generated_resource_segment(value: &str) -> Option<String> {
+    let mut normalized = String::new();
+    let mut previous_was_dash = false;
+
+    for character in value.trim().chars() {
+        let next = match character {
+            'a'..='z' | '0'..='9' | '_' | '.' => Some(character),
+            'A'..='Z' => Some(character.to_ascii_lowercase()),
+            '-' => Some('-'),
+            _ => Some('-'),
+        };
+
+        let Some(next) = next else {
+            continue;
+        };
+
+        if next == '-' {
+            if normalized.is_empty() || previous_was_dash {
+                continue;
+            }
+            previous_was_dash = true;
+            normalized.push(next);
+            continue;
+        }
+
+        previous_was_dash = false;
+        normalized.push(next);
+    }
+
+    let trimmed = normalized
+        .trim_matches(|character| matches!(character, '-' | '_' | '.'))
+        .to_string();
+    (!trimmed.is_empty()).then_some(trimmed)
+}
+
+fn sanitize_tags(tags: Vec<String>) -> Vec<String> {
+    let mut seen = BTreeSet::new();
+    let mut sanitized = Vec::new();
+
+    for tag in tags
+        .into_iter()
+        .map(|tag| tag.trim().to_string())
+        .filter(|tag| !tag.is_empty())
+    {
+        if seen.insert(tag.clone()) {
+            sanitized.push(tag);
+        }
+    }
+
+    sanitized
+}
+
+fn sanitize_metadata(metadata: BTreeMap<String, String>) -> BTreeMap<String, String> {
+    metadata
+        .into_iter()
+        .filter_map(|(key, value)| {
+            let sanitized_key = key.trim();
+            let sanitized_value = value.trim();
+            if sanitized_key.is_empty() || sanitized_value.is_empty() {
+                return None;
+            }
+
+            Some((sanitized_key.to_string(), sanitized_value.to_string()))
+        })
+        .collect()
 }
 
 fn bootstrap_secret_catalog(path: &Path) -> Result<bool, ValueResolverError> {
@@ -1040,15 +1485,18 @@ fn normalize_match(left: &str, right: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use std::{fs, path::Path};
+    use std::{collections::BTreeMap, fs, path::Path};
 
     use tempfile::tempdir;
 
     use super::{
-        default_value_resolver, import_secret_reference_at_with_programs,
-        LocalSecretCatalogResolver, SecretImportSpec, SecretSourceLocator, ValueResolver,
-        ValueResolverError, VendorCliPrograms, BITWARDEN_CLI_PROVIDER_KIND,
-        DOTENV_FILE_PROVIDER_KIND, ONEPASSWORD_CLI_PROVIDER_KIND,
+        default_value_resolver, delete_imported_secret_reference_at,
+        import_secret_reference_at_with_programs, import_secret_references_at_with_programs,
+        list_imported_secret_references_at, update_imported_secret_reference_at,
+        ImportedSecretReferenceUpdate, LocalSecretCatalogResolver, SecretImportBatchSpec,
+        SecretImportSpec, SecretSourceLocator, ValueResolver, ValueResolverError,
+        VendorCliPrograms, BITWARDEN_CLI_PROVIDER_KIND, DOTENV_FILE_PROVIDER_KIND,
+        ONEPASSWORD_CLI_PROVIDER_KIND,
     };
 
     #[test]
@@ -1120,6 +1568,7 @@ mod tests {
                 display_name: Some("Demo secret".to_string()),
                 description: Some("imported from dotenv".to_string()),
                 tags: vec!["demo".to_string()],
+                metadata: BTreeMap::from([("owner".to_string(), "alice".to_string())]),
                 source_locator: SecretSourceLocator::DotenvFile {
                     file_path: env_path.clone(),
                     namespace: Some("app".to_string()),
@@ -1139,6 +1588,10 @@ mod tests {
         assert_eq!(receipt.reference.provider_kind(), DOTENV_FILE_PROVIDER_KIND);
         assert!(receipt.reference.last_verified_at.is_some());
         assert_eq!(
+            receipt.reference.metadata.get("owner").map(String::as_str),
+            Some("alice")
+        );
+        assert_eq!(
             resolver
                 .resolve("secret/demo")
                 .expect("dotenv value should resolve"),
@@ -1147,6 +1600,108 @@ mod tests {
         assert_eq!(resolver.list_resources(), vec!["secret/demo".to_string()]);
         assert!(catalog_content.contains("provider_kind = \"dotenv_file\""));
         assert!(!catalog_content.contains("demo-value"));
+    }
+
+    #[test]
+    fn dotenv_import_generates_default_resource_when_resource_is_blank() {
+        let temp = tempdir().expect("temp directory should be created");
+        let env_path = temp.path().join(".env");
+        let catalog_path = temp.path().join("catalog.toml");
+        fs::write(&env_path, "APP_SECRET_DEMO=demo-value\n").expect(".env should be written");
+
+        let receipt = import_secret_reference_at_with_programs(
+            catalog_path.as_path(),
+            SecretImportSpec {
+                resource: String::new(),
+                display_name: None,
+                description: None,
+                tags: Vec::new(),
+                metadata: BTreeMap::new(),
+                source_locator: SecretSourceLocator::DotenvFile {
+                    file_path: env_path,
+                    namespace: Some("app".to_string()),
+                    prefix: Some("APP_".to_string()),
+                    key: "SECRET_DEMO".to_string(),
+                },
+            },
+            &VendorCliPrograms::from_env(),
+        )
+        .expect("dotenv import should succeed");
+
+        assert_eq!(receipt.reference.resource, "secret/app/secret_demo");
+    }
+
+    #[test]
+    fn batch_import_uses_shared_template_without_persisting_secret_values() {
+        let temp = tempdir().expect("temp directory should be created");
+        let env_path = temp.path().join(".env");
+        let catalog_path = temp.path().join("catalog.toml");
+        fs::write(&env_path, "APP_ALPHA=alpha-secret\nAPP_BETA=beta-secret\n")
+            .expect(".env should be written");
+
+        let receipt = import_secret_references_at_with_programs(
+            catalog_path.as_path(),
+            SecretImportBatchSpec {
+                resource_template: Some("config/{{ source_name }}/{{ key }}".to_string()),
+                imports: vec![
+                    SecretImportSpec {
+                        resource: String::new(),
+                        display_name: None,
+                        description: None,
+                        tags: vec!["alpha".to_string()],
+                        metadata: BTreeMap::new(),
+                        source_locator: SecretSourceLocator::DotenvFile {
+                            file_path: env_path.clone(),
+                            namespace: Some("svc".to_string()),
+                            prefix: Some("APP_".to_string()),
+                            key: "ALPHA".to_string(),
+                        },
+                    },
+                    SecretImportSpec {
+                        resource: String::new(),
+                        display_name: None,
+                        description: None,
+                        tags: vec!["beta".to_string()],
+                        metadata: BTreeMap::new(),
+                        source_locator: SecretSourceLocator::DotenvFile {
+                            file_path: env_path,
+                            namespace: Some("svc".to_string()),
+                            prefix: Some("APP_".to_string()),
+                            key: "BETA".to_string(),
+                        },
+                    },
+                ],
+            },
+            &VendorCliPrograms::from_env(),
+        )
+        .expect("batch import should succeed");
+
+        let catalog_content =
+            fs::read_to_string(catalog_path.as_path()).expect("catalog should be readable");
+        let resolver = LocalSecretCatalogResolver::load_from_path(catalog_path.as_path())
+            .expect("resolver should load");
+
+        assert_eq!(receipt.receipts.len(), 2);
+        assert_eq!(
+            receipt
+                .receipts
+                .iter()
+                .map(|item| item.reference.resource.clone())
+                .collect::<Vec<_>>(),
+            vec![
+                "config/svc/alpha".to_string(),
+                "config/svc/beta".to_string(),
+            ]
+        );
+        assert_eq!(
+            resolver.list_resources(),
+            vec![
+                "config/svc/alpha".to_string(),
+                "config/svc/beta".to_string(),
+            ]
+        );
+        assert!(!catalog_content.contains("alpha-secret"));
+        assert!(!catalog_content.contains("beta-secret"));
     }
 
     #[test]
@@ -1248,6 +1803,93 @@ mod tests {
         );
     }
 
+    #[test]
+    fn imported_catalog_supports_listing_update_and_delete() {
+        let temp = tempdir().expect("temp directory should be created");
+        let env_path = temp.path().join(".env");
+        let catalog_path = temp.path().join("catalog.toml");
+        fs::write(&env_path, "APP_SECRET_DEMO=demo-value\n").expect(".env should be written");
+
+        import_secret_reference_at_with_programs(
+            catalog_path.as_path(),
+            SecretImportSpec {
+                resource: "secret/demo".to_string(),
+                display_name: Some("Demo secret".to_string()),
+                description: Some("before update".to_string()),
+                tags: vec!["prod".to_string()],
+                metadata: BTreeMap::from([
+                    ("team".to_string(), "backend".to_string()),
+                    ("owner".to_string(), "alice".to_string()),
+                ]),
+                source_locator: SecretSourceLocator::DotenvFile {
+                    file_path: env_path,
+                    namespace: Some("app".to_string()),
+                    prefix: Some("APP_".to_string()),
+                    key: "SECRET_DEMO".to_string(),
+                },
+            },
+            &VendorCliPrograms::from_env(),
+        )
+        .expect("import should succeed");
+
+        let listed = list_imported_secret_references_at(catalog_path.as_path())
+            .expect("catalog should list imports");
+        assert_eq!(listed.imports.len(), 1);
+        assert_eq!(listed.imports[0].resource, "secret/demo");
+        assert_eq!(
+            listed.imports[0].metadata.get("team").map(String::as_str),
+            Some("backend")
+        );
+
+        let updated = update_imported_secret_reference_at(
+            catalog_path.as_path(),
+            ImportedSecretReferenceUpdate {
+                resource: "secret/demo".to_string(),
+                display_name: Some("Renamed demo".to_string()),
+                description: Some("after update".to_string()),
+                tags: vec![
+                    "prod".to_string(),
+                    "rotated".to_string(),
+                    "prod".to_string(),
+                ],
+                metadata: BTreeMap::from([
+                    ("owner".to_string(), "bob".to_string()),
+                    ("team".to_string(), "platform".to_string()),
+                ]),
+            },
+        )
+        .expect("update should succeed");
+
+        assert_eq!(updated.reference.display_name, "Renamed demo");
+        assert_eq!(
+            updated.reference.tags,
+            vec!["prod".to_string(), "rotated".to_string()]
+        );
+        assert_eq!(
+            updated.reference.metadata.get("owner").map(String::as_str),
+            Some("bob")
+        );
+
+        let reloaded = list_imported_secret_references_at(catalog_path.as_path())
+            .expect("catalog should reload imports");
+        assert_eq!(
+            reloaded.imports[0].description.as_deref(),
+            Some("after update")
+        );
+        assert_eq!(
+            reloaded.imports[0].metadata.get("team").map(String::as_str),
+            Some("platform")
+        );
+
+        assert!(
+            delete_imported_secret_reference_at(catalog_path.as_path(), "secret/demo")
+                .expect("delete should succeed")
+        );
+        let after_delete = list_imported_secret_references_at(catalog_path.as_path())
+            .expect("catalog should load after delete");
+        assert!(after_delete.imports.is_empty());
+    }
+
     #[cfg(unix)]
     #[test]
     fn resolves_1password_reference_via_cli_contract() {
@@ -1291,6 +1933,7 @@ exit 1
                 display_name: None,
                 description: None,
                 tags: Vec::new(),
+                metadata: BTreeMap::new(),
                 source_locator: SecretSourceLocator::OnePasswordCli {
                     account: "demo@example.com".to_string(),
                     account_id: Some("acct-1".to_string()),
@@ -1356,6 +1999,7 @@ exit 1
                 display_name: None,
                 description: None,
                 tags: Vec::new(),
+                metadata: BTreeMap::new(),
                 source_locator: SecretSourceLocator::BitwardenCli {
                     account: "personal".to_string(),
                     organization: None,

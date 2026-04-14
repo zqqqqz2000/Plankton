@@ -4,6 +4,7 @@ use std::{
     collections::BTreeMap,
     env,
     io::{self, Write},
+    path::PathBuf,
     process::ExitCode,
     time::Duration,
 };
@@ -12,10 +13,11 @@ use anyhow::{bail, Context, Result};
 use clap::{ArgGroup, Args, Parser, Subcommand, ValueEnum};
 use desktop_handoff::maybe_trigger_desktop_handoff;
 use plankton_core::{
-    collect_runtime_call_chain, default_value_resolver, derive_script_path, load_settings,
-    prompt_call_chain_paths, AccessRequest, ApprovalStatus, AuditAction, AuditRecord,
-    AutomaticDecisionSource, AutomaticDecisionTrace, AutomaticDisposition, Decision, LlmSuggestion,
-    LlmSuggestionUsage, PlanktonSettings, PolicyMode, ProviderTrace, RequestContext,
+    collect_runtime_call_chain, default_value_resolver, derive_script_path,
+    import_secret_reference, load_settings, prompt_call_chain_paths, AccessRequest, ApprovalStatus,
+    AuditAction, AuditRecord, AutomaticDecisionSource, AutomaticDecisionTrace,
+    AutomaticDisposition, Decision, LlmSuggestion, LlmSuggestionUsage, PlanktonSettings,
+    PolicyMode, ProviderTrace, RequestContext, SecretImportSpec, SecretSourceLocator,
     SuggestedDecision, ValueResolver, ValueResolverError,
 };
 use plankton_store::{RequestQueryResult, SqliteStore};
@@ -30,9 +32,9 @@ const GET_POLL_INTERVAL: Duration = Duration::from_millis(250);
 #[command(
     author,
     version,
-    about = "Plankton command-line companion for listing, searching, and requesting access",
+    about = "Plankton command-line companion for listing resources, importing password sources, and requesting access",
     arg_required_else_help = true,
-    after_help = "Examples:\n  plankton list\n  plankton search api-token\n  plankton get secret/api-token --reason \"Smoke test\" --requested-by alice\n  plankton get secret/api-token --reason \"Auto smoke\" --policy-mode auto\n  plankton get secret/api-token --reason \"Scripted smoke\" --output json\n\nSuccessful `get` text output prints only the resolved secret value. Use `--output json` for a minimal machine-readable envelope. When a request is denied and a recorded reason is available, Plankton appends that reason to the deny error.\n\nHuman approvals and request history live in the desktop UI. The public CLI surface is intentionally limited to `get`, `list`, and `search`."
+    after_help = "Examples:\n  plankton list\n  plankton search api-token\n  plankton import dotenv-file --resource secret/api-token --file .env --key API_TOKEN\n  plankton get secret/api-token --reason \"Smoke test\" --requested-by alice\n  plankton get secret/api-token --reason \"Auto smoke\" --policy-mode auto\n  plankton get secret/api-token --reason \"Scripted smoke\" --output json\n\nSuccessful `get` text output prints only the resolved secret value. Use `--output json` for a minimal machine-readable envelope. When a request is denied and a recorded reason is available, Plankton appends that reason to the deny error.\n\nHuman approvals and request history live in the desktop UI. The public CLI surface is intentionally limited to `get`, `list`, `search`, and `import`."
 )]
 struct Cli {
     #[arg(
@@ -85,6 +87,13 @@ enum Commands {
     List(ListArgs),
     #[command(about = "Fuzzy-search the same resource directory used by `list` and `get`")]
     Search(SearchArgs),
+    #[command(
+        name = "import",
+        alias = "import-source",
+        about = "Import a password source locator into the local catalog without storing secret values",
+        after_help = "Supported source kinds:\n  1password-cli: account -> vault -> item -> field\n  bitwarden-cli: account -> organization/collection/folder -> item -> field\n  dotenv-file: file -> namespace/prefix -> key\n\nPlankton verifies the source at import time, then stores only the source locator in the local secret catalog. Secret values, vendor sessions, and provider tokens are not written into SQLite, audit payloads, or provider payloads."
+    )]
+    Import(ImportArgs),
 }
 
 #[derive(Debug, Args)]
@@ -139,6 +148,98 @@ struct SearchArgs {
         help = "Case-insensitive fuzzy match against resource identifiers"
     )]
     query: String,
+}
+
+#[derive(Debug, Args)]
+struct ImportArgs {
+    #[command(subcommand)]
+    source: ImportSourceCommand,
+}
+
+#[derive(Debug, Subcommand)]
+enum ImportSourceCommand {
+    #[command(name = "1password-cli", alias = "1password_cli")]
+    OnePasswordCli(OnePasswordImportArgs),
+    #[command(name = "bitwarden-cli", alias = "bitwarden_cli")]
+    BitwardenCli(BitwardenImportArgs),
+    #[command(name = "dotenv-file", alias = "dotenv_file")]
+    DotenvFile(DotenvImportArgs),
+}
+
+#[derive(Debug, Args, Clone)]
+struct ImportCommonArgs {
+    #[arg(
+        long,
+        value_name = "RESOURCE",
+        help = "Optional resource identifier override. When omitted, Plankton generates one from the active import rule."
+    )]
+    resource: Option<String>,
+    #[arg(long, value_name = "NAME")]
+    display_name: Option<String>,
+    #[arg(long, value_name = "TEXT")]
+    description: Option<String>,
+    #[arg(long = "tag", value_name = "TAG")]
+    tags: Vec<String>,
+    #[arg(
+        long = "metadata",
+        value_name = "KEY=VALUE",
+        help = "Repeat to attach import metadata without storing secret values"
+    )]
+    metadata: Vec<String>,
+}
+
+#[derive(Debug, Args, Clone)]
+struct OnePasswordImportArgs {
+    #[command(flatten)]
+    common: ImportCommonArgs,
+    #[arg(long, value_name = "ACCOUNT")]
+    account: String,
+    #[arg(long, value_name = "VAULT")]
+    vault: String,
+    #[arg(long, value_name = "ITEM")]
+    item: String,
+    #[arg(long, value_name = "FIELD")]
+    field: String,
+    #[arg(long, value_name = "VAULT_ID")]
+    vault_id: Option<String>,
+    #[arg(long, value_name = "ITEM_ID")]
+    item_id: Option<String>,
+    #[arg(long, value_name = "FIELD_ID")]
+    field_id: Option<String>,
+}
+
+#[derive(Debug, Args, Clone)]
+struct BitwardenImportArgs {
+    #[command(flatten)]
+    common: ImportCommonArgs,
+    #[arg(long, value_name = "ACCOUNT")]
+    account: String,
+    #[arg(long, value_name = "ORG")]
+    organization: Option<String>,
+    #[arg(long, value_name = "COLLECTION")]
+    collection: Option<String>,
+    #[arg(long, value_name = "FOLDER")]
+    folder: Option<String>,
+    #[arg(long, value_name = "ITEM")]
+    item: String,
+    #[arg(long, value_name = "FIELD")]
+    field: String,
+    #[arg(long, value_name = "ITEM_ID")]
+    item_id: Option<String>,
+}
+
+#[derive(Debug, Args, Clone)]
+struct DotenvImportArgs {
+    #[command(flatten)]
+    common: ImportCommonArgs,
+    #[arg(long, value_name = "PATH")]
+    file: PathBuf,
+    #[arg(long, value_name = "NAMESPACE")]
+    namespace: Option<String>,
+    #[arg(long, value_name = "PREFIX")]
+    prefix: Option<String>,
+    #[arg(long, value_name = "KEY")]
+    key: String,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
@@ -299,6 +400,22 @@ struct ResourceDirectoryOutputView {
     resources: Vec<String>,
 }
 
+#[derive(Debug, Clone, Serialize)]
+struct ImportReceiptOutputView {
+    catalog_path: String,
+    resource: String,
+    display_name: String,
+    description: Option<String>,
+    tags: Vec<String>,
+    metadata: BTreeMap<String, String>,
+    provider_kind: String,
+    container_label: Option<String>,
+    field_selector: String,
+    imported_at: chrono::DateTime<chrono::Utc>,
+    last_verified_at: Option<chrono::DateTime<chrono::Utc>>,
+    source_locator: SecretSourceLocator,
+}
+
 #[cfg(test)]
 #[derive(Debug, Clone, Serialize)]
 struct AuditOutputView {
@@ -379,10 +496,10 @@ async fn main() -> ExitCode {
 
 async fn run() -> Result<ExitCode> {
     let Cli { output, command } = Cli::parse();
-    let settings = load_settings().context("failed to load Plankton settings")?;
 
     match command {
         Commands::Get(args) => {
+            let settings = load_settings().context("failed to load Plankton settings")?;
             let store = SqliteStore::new(&settings)
                 .await
                 .context("failed to initialize SQLite store")?;
@@ -434,6 +551,16 @@ async fn run() -> Result<ExitCode> {
             let directory_output = build_resource_directory_output(&filtered);
             print_output(output, &directory_output, || {
                 render_resource_directory_text(&filtered)
+            })?;
+        }
+        Commands::Import(args) => {
+            let spec = build_import_spec(args);
+            let receipt = import_secret_reference(spec).context(
+                "failed to import password manager source into the local secret catalog",
+            )?;
+            let output_view = build_import_receipt_output(&receipt);
+            print_output(output, &output_view, || {
+                render_import_receipt_text(&output_view)
             })?;
         }
     }
@@ -512,6 +639,60 @@ fn load_active_resource_directory() -> Result<Vec<String>> {
     let resolver =
         default_value_resolver().context("failed to load the active resource directory")?;
     Ok(resolver.list_resources())
+}
+
+fn build_import_spec(args: ImportArgs) -> SecretImportSpec {
+    match args.source {
+        ImportSourceCommand::OnePasswordCli(args) => SecretImportSpec {
+            resource: args.common.resource.unwrap_or_default(),
+            display_name: args.common.display_name,
+            description: args.common.description,
+            tags: args.common.tags,
+            metadata: parse_key_values("metadata", args.common.metadata)
+                .expect("clap should validate import metadata"),
+            source_locator: SecretSourceLocator::OnePasswordCli {
+                account: args.account,
+                account_id: None,
+                vault: args.vault,
+                item: args.item,
+                field: args.field,
+                vault_id: args.vault_id,
+                item_id: args.item_id,
+                field_id: args.field_id,
+            },
+        },
+        ImportSourceCommand::BitwardenCli(args) => SecretImportSpec {
+            resource: args.common.resource.unwrap_or_default(),
+            display_name: args.common.display_name,
+            description: args.common.description,
+            tags: args.common.tags,
+            metadata: parse_key_values("metadata", args.common.metadata)
+                .expect("clap should validate import metadata"),
+            source_locator: SecretSourceLocator::BitwardenCli {
+                account: args.account,
+                organization: args.organization,
+                collection: args.collection,
+                folder: args.folder,
+                item: args.item,
+                field: args.field,
+                item_id: args.item_id,
+            },
+        },
+        ImportSourceCommand::DotenvFile(args) => SecretImportSpec {
+            resource: args.common.resource.unwrap_or_default(),
+            display_name: args.common.display_name,
+            description: args.common.description,
+            tags: args.common.tags,
+            metadata: parse_key_values("metadata", args.common.metadata)
+                .expect("clap should validate import metadata"),
+            source_locator: SecretSourceLocator::DotenvFile {
+                file_path: args.file,
+                namespace: args.namespace,
+                prefix: args.prefix,
+                key: args.key,
+            },
+        },
+    }
 }
 
 fn print_raw_value(value: &str) -> Result<()> {
@@ -917,6 +1098,25 @@ fn build_resource_directory_output(resources: &[String]) -> ResourceDirectoryOut
     }
 }
 
+fn build_import_receipt_output(
+    receipt: &plankton_core::ImportedSecretReceipt,
+) -> ImportReceiptOutputView {
+    ImportReceiptOutputView {
+        catalog_path: receipt.catalog_path.display().to_string(),
+        resource: receipt.reference.resource.clone(),
+        display_name: receipt.reference.display_name.clone(),
+        description: receipt.reference.description.clone(),
+        tags: receipt.reference.tags.clone(),
+        metadata: receipt.reference.metadata.clone(),
+        provider_kind: receipt.reference.provider_kind().to_string(),
+        container_label: receipt.reference.container_label().map(ToOwned::to_owned),
+        field_selector: receipt.reference.field_selector().to_string(),
+        imported_at: receipt.reference.imported_at,
+        last_verified_at: receipt.reference.last_verified_at,
+        source_locator: receipt.reference.source_locator.clone(),
+    }
+}
+
 #[cfg(test)]
 fn build_audit_output(request_id: Option<&str>, records: &[AuditRecord]) -> AuditOutputView {
     AuditOutputView {
@@ -1102,6 +1302,101 @@ fn render_status_text(result: &RequestQueryResult) -> String {
 
 fn render_resource_directory_text(resources: &[String]) -> String {
     resources.join("\n")
+}
+
+fn render_import_receipt_text(output: &ImportReceiptOutputView) -> String {
+    let mut lines = vec![
+        format!("catalog_path: {}", output.catalog_path),
+        format!("resource: {}", output.resource),
+        format!("display_name: {}", output.display_name),
+        format!("provider_kind: {}", output.provider_kind),
+    ];
+
+    if let Some(description) = output.description.as_deref() {
+        lines.push(format!("description: {description}"));
+    }
+
+    if !output.tags.is_empty() {
+        lines.push(format!("tags: {}", output.tags.join(",")));
+    }
+
+    if !output.metadata.is_empty() {
+        lines.push(format!("metadata: {}", format_map(&output.metadata)));
+    }
+
+    if let Some(container_label) = output.container_label.as_deref() {
+        lines.push(format!("container_label: {container_label}"));
+    }
+
+    lines.extend([
+        format!("field_selector: {}", output.field_selector),
+        format!("imported_at: {}", output.imported_at.to_rfc3339()),
+    ]);
+
+    if let Some(last_verified_at) = output.last_verified_at {
+        lines.push(format!(
+            "last_verified_at: {}",
+            last_verified_at.to_rfc3339()
+        ));
+    }
+
+    lines.push(format!(
+        "source_locator: {}",
+        render_source_locator_summary(&output.source_locator)
+    ));
+
+    lines.join("\n")
+}
+
+fn render_source_locator_summary(locator: &SecretSourceLocator) -> String {
+    match locator {
+        SecretSourceLocator::OnePasswordCli {
+            account,
+            vault,
+            item,
+            field,
+            ..
+        } => format!("account={account} vault={vault} item={item} field={field}"),
+        SecretSourceLocator::BitwardenCli {
+            account,
+            organization,
+            collection,
+            folder,
+            item,
+            field,
+            ..
+        } => {
+            let mut parts = vec![format!("account={account}")];
+            if let Some(organization) = organization.as_deref() {
+                parts.push(format!("organization={organization}"));
+            }
+            if let Some(collection) = collection.as_deref() {
+                parts.push(format!("collection={collection}"));
+            }
+            if let Some(folder) = folder.as_deref() {
+                parts.push(format!("folder={folder}"));
+            }
+            parts.push(format!("item={item}"));
+            parts.push(format!("field={field}"));
+            parts.join(" ")
+        }
+        SecretSourceLocator::DotenvFile {
+            file_path,
+            namespace,
+            prefix,
+            key,
+        } => {
+            let mut parts = vec![format!("file={}", file_path.display())];
+            if let Some(namespace) = namespace.as_deref() {
+                parts.push(format!("namespace={namespace}"));
+            }
+            if let Some(prefix) = prefix.as_deref() {
+                parts.push(format!("prefix={prefix}"));
+            }
+            parts.push(format!("key={key}"));
+            parts.join(" ")
+        }
+    }
 }
 
 #[cfg(test)]
@@ -2248,15 +2543,16 @@ mod tests {
     }
 
     #[test]
-    fn help_text_marks_cli_as_read_only() {
+    fn help_text_marks_cli_as_non_approval_surface() {
         let mut command = Cli::command();
         let help = command.render_long_help().to_string();
 
         assert!(help.contains("desktop UI"));
-        assert!(help.contains("`get`, `list`, and `search`"));
+        assert!(help.contains("`get`, `list`, `search`, and `import`"));
         assert!(help.contains("\n  get"));
         assert!(help.contains("\n  list"));
         assert!(help.contains("\n  search"));
+        assert!(help.contains("\n  import"));
         assert!(!help.contains("\n  status"));
         assert!(!help.contains("\n  suggestion"));
         assert!(!help.contains("\n  queue"));
@@ -2864,6 +3160,148 @@ mod tests {
 
         assert_eq!(filtered.len(), 1);
         assert_eq!(filtered[0], "secret/dev-token");
+    }
+
+    #[test]
+    fn parses_hidden_dotenv_import_command() {
+        let cli = Cli::try_parse_from([
+            "plankton",
+            "import-source",
+            "dotenv-file",
+            "--resource",
+            "secret/demo",
+            "--file",
+            "/tmp/demo.env",
+            "--namespace",
+            "dev",
+            "--prefix",
+            "APP_",
+            "--key",
+            "DEMO_TOKEN",
+        ])
+        .expect("hidden import command should parse");
+
+        let spec = match cli.command {
+            Commands::Import(args) => build_import_spec(args),
+            _ => panic!("expected hidden import command"),
+        };
+
+        assert_eq!(spec.resource, "secret/demo");
+        assert_eq!(spec.display_name, None);
+        assert!(matches!(
+            spec.source_locator,
+            SecretSourceLocator::DotenvFile {
+                file_path,
+                namespace,
+                prefix,
+                key
+            } if file_path == PathBuf::from("/tmp/demo.env")
+                && namespace.as_deref() == Some("dev")
+                && prefix.as_deref() == Some("APP_")
+                && key == "DEMO_TOKEN"
+        ));
+    }
+
+    #[test]
+    fn parses_public_dotenv_import_command() {
+        let cli = Cli::try_parse_from([
+            "plankton",
+            "import",
+            "dotenv-file",
+            "--resource",
+            "secret/demo",
+            "--file",
+            "/tmp/demo.env",
+            "--key",
+            "DEMO_TOKEN",
+        ])
+        .expect("public import command should parse");
+
+        let spec = match cli.command {
+            Commands::Import(args) => build_import_spec(args),
+            _ => panic!("expected import command"),
+        };
+
+        assert_eq!(spec.resource, "secret/demo");
+        assert!(matches!(
+            spec.source_locator,
+            SecretSourceLocator::DotenvFile {
+                file_path,
+                namespace,
+                prefix,
+                key
+            } if file_path == PathBuf::from("/tmp/demo.env")
+                && namespace.is_none()
+                && prefix.is_none()
+                && key == "DEMO_TOKEN"
+        ));
+    }
+
+    #[test]
+    fn parses_public_dotenv_import_command_without_resource() {
+        let cli = Cli::try_parse_from([
+            "plankton",
+            "import",
+            "dotenv-file",
+            "--file",
+            "/tmp/demo.env",
+            "--key",
+            "DEMO_TOKEN",
+        ])
+        .expect("public import command should parse without an explicit resource");
+
+        let spec = match cli.command {
+            Commands::Import(args) => build_import_spec(args),
+            _ => panic!("expected import command"),
+        };
+
+        assert_eq!(spec.resource, "");
+        assert!(matches!(
+            spec.source_locator,
+            SecretSourceLocator::DotenvFile {
+                file_path,
+                namespace,
+                prefix,
+                key
+            } if file_path == PathBuf::from("/tmp/demo.env")
+                && namespace.is_none()
+                && prefix.is_none()
+                && key == "DEMO_TOKEN"
+        ));
+    }
+
+    #[test]
+    fn renders_import_receipt_without_secret_value() {
+        let output = build_import_receipt_output(&plankton_core::ImportedSecretReceipt {
+            catalog_path: PathBuf::from("/tmp/plankton-secrets.toml"),
+            reference: plankton_core::ImportedSecretReference {
+                resource: "secret/demo".to_string(),
+                display_name: "Demo token".to_string(),
+                description: Some("dotenv-backed".to_string()),
+                tags: vec!["demo".to_string()],
+                metadata: BTreeMap::from([("owner".to_string(), "alice".to_string())]),
+                source_locator: SecretSourceLocator::DotenvFile {
+                    file_path: PathBuf::from("/tmp/demo.env"),
+                    namespace: Some("dev".to_string()),
+                    prefix: Some("APP_".to_string()),
+                    key: "DEMO_TOKEN".to_string(),
+                },
+                imported_at: chrono::Utc::now(),
+                last_verified_at: None,
+            },
+        });
+
+        let rendered = render_import_receipt_text(&output);
+        let serialized =
+            serde_json::to_value(&output).expect("import receipt output should serialize");
+
+        assert!(rendered.contains("resource: secret/demo"));
+        assert!(rendered.contains("provider_kind: dotenv_file"));
+        assert!(rendered.contains("metadata: owner=alice"));
+        assert!(rendered.contains("source_locator: file=/tmp/demo.env"));
+        assert!(!rendered.contains("demo-value"));
+        assert_eq!(serialized["provider_kind"], "dotenv_file");
+        assert!(serialized["source_locator"]["provider_kind"] == "dotenv_file");
     }
 
     #[test]

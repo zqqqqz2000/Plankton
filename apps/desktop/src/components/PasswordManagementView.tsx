@@ -1,20 +1,22 @@
 import { invoke } from "@tauri-apps/api/core";
 import { useEffect, useState, type JSX } from "react";
 
+import { ImportedSecretCatalogPanel } from "./ImportedSecretCatalogPanel";
 import { formatTimestamp } from "../formatters";
 import { t, translateCode, type Locale } from "../i18n";
 import type {
-  BitwardenCliLocator,
   BitwardenContainerOption,
-  DotenvFileLocator,
   DotenvGroupOption,
   DotenvInspection,
   DotenvKeyOption,
   ImportFieldOption,
   ImportPickerOption,
+  ImportedSecretBatchReceipt,
+  ImportedSecretCatalog,
   ImportedSecretReceipt,
   ImportedSecretReference,
-  OnePasswordCliLocator,
+  ImportedSecretReferenceUpdate,
+  SecretImportBatchSpec,
   SecretImportSpec,
   SecretSourceLocator,
 } from "../types";
@@ -26,6 +28,7 @@ type CommonImportDraft = {
   displayName: string;
   description: string;
   tags: string;
+  metadata: string;
 };
 
 type OnePasswordDraft = {
@@ -68,6 +71,14 @@ type ProviderOption = {
     | "importScopeDotenv";
 };
 
+type ResourceTemplateMode = "default" | "custom";
+type ResourceTemplateTokenMap = Record<string, string>;
+type ResourcePreviewResult = {
+  missingTokens: string[];
+  resource: string | null;
+};
+type FieldOptionsByResourceId = Record<string, ImportFieldOption[]>;
+
 type PickerRenderableOption = {
   id: string;
   label: string;
@@ -96,6 +107,22 @@ type LocatorFieldProps = {
   optionalLabel: string;
   optional?: boolean;
   hint?: string;
+  disabled?: boolean;
+};
+
+type MultiPickerSectionProps = {
+  title: string;
+  caption?: string;
+  helper?: string;
+  dataTestId: string;
+  options: PickerRenderableOption[];
+  selectedIds: string[];
+  onToggleSelect: (id: string) => void;
+  emptyMessage: string;
+  loading: boolean;
+  searchQuery?: string;
+  onSearchQueryChange?: (value: string) => void;
+  searchPlaceholder?: string;
 };
 
 type PasswordManagementViewProps = {
@@ -125,6 +152,7 @@ const EMPTY_COMMON_DRAFT: CommonImportDraft = {
   displayName: "",
   description: "",
   tags: "",
+  metadata: "",
 };
 
 const EMPTY_ONEPASSWORD_DRAFT: OnePasswordDraft = {
@@ -167,6 +195,353 @@ function parseTags(value: string): string[] {
     .filter((entry) => entry.length > 0);
 }
 
+function parseMetadataDraft(value: string): {
+  metadata: Record<string, string>;
+  invalidLines: string[];
+} {
+  const metadata: Record<string, string> = {};
+  const invalidLines: string[] = [];
+
+  for (const rawLine of value.split("\n")) {
+    const line = rawLine.trim();
+    if (line.length === 0) {
+      continue;
+    }
+
+    const separatorIndex = line.indexOf("=");
+    if (separatorIndex <= 0 || separatorIndex === line.length - 1) {
+      invalidLines.push(line);
+      continue;
+    }
+
+    const key = line.slice(0, separatorIndex).trim();
+    const nextValue = line.slice(separatorIndex + 1).trim();
+    if (key.length === 0 || nextValue.length === 0) {
+      invalidLines.push(line);
+      continue;
+    }
+
+    metadata[key] = nextValue;
+  }
+
+  return {
+    metadata,
+    invalidLines,
+  };
+}
+
+function normalizeResourceSegment(value: string): string | null {
+  let normalized = "";
+  let previousWasDash = false;
+
+  for (const character of value.trim()) {
+    let next: string;
+    if (
+      (character >= "a" && character <= "z") ||
+      (character >= "0" && character <= "9") ||
+      character === "_" ||
+      character === "."
+    ) {
+      next = character;
+    } else if (character >= "A" && character <= "Z") {
+      next = character.toLowerCase();
+    } else {
+      next = "-";
+    }
+
+    if (next === "-") {
+      if (normalized.length === 0 || previousWasDash) {
+        continue;
+      }
+
+      previousWasDash = true;
+      normalized += next;
+      continue;
+    }
+
+    previousWasDash = false;
+    normalized += next;
+  }
+
+  const trimmed = normalized.replace(/^[-_.]+|[-_.]+$/g, "");
+  return trimmed.length > 0 ? trimmed : null;
+}
+
+function normalizeResourcePath(value: string): string {
+  return value
+    .split("/")
+    .map((segment) => normalizeResourceSegment(segment))
+    .filter((segment): segment is string => segment !== null)
+    .join("/");
+}
+
+function defaultResourceTemplateForProvider(
+  providerKind: SecretImportProviderKind,
+): string {
+  if (providerKind === "1password_cli") {
+    return "secret/{{ account }}/{{ vault }}/{{ item }}/{{ field }}";
+  }
+
+  if (providerKind === "bitwarden_cli") {
+    return "secret/{{ container }}/{{ item }}/{{ field }}";
+  }
+
+  return "secret/{{ source_name }}/{{ key }}";
+}
+
+function availableTemplateTokens(
+  providerKind: SecretImportProviderKind,
+): string[] {
+  if (providerKind === "1password_cli") {
+    return [
+      "provider_kind",
+      "account",
+      "account_id",
+      "vault",
+      "vault_id",
+      "container",
+      "item",
+      "item_id",
+      "field",
+      "field_id",
+    ];
+  }
+
+  if (providerKind === "bitwarden_cli") {
+    return [
+      "provider_kind",
+      "account",
+      "organization",
+      "collection",
+      "folder",
+      "container",
+      "item",
+      "item_id",
+      "field",
+    ];
+  }
+
+  return [
+    "provider_kind",
+    "file_path",
+    "file_name",
+    "file_stem",
+    "namespace",
+    "prefix",
+    "source_name",
+    "key",
+  ];
+}
+
+function pathFileName(value: string): string {
+  return value.split(/[/\\]/).filter(Boolean).at(-1) ?? "dotenv";
+}
+
+function pathFileStem(value: string): string {
+  const fileName = pathFileName(value);
+  const lastDot = fileName.lastIndexOf(".");
+  return lastDot > 0 ? fileName.slice(0, lastDot) : fileName;
+}
+
+function templateTokensForSourceLocator(
+  locator: SecretSourceLocator,
+): ResourceTemplateTokenMap {
+  if (locator.provider_kind === "1password_cli") {
+    const tokens: ResourceTemplateTokenMap = {
+      provider_kind: locator.provider_kind,
+      account: locator.account,
+      vault: locator.vault,
+      container: locator.vault,
+      item: locator.item,
+      field: locator.field,
+    };
+
+    if (locator.account_id) {
+      tokens.account_id = locator.account_id;
+    }
+    if (locator.vault_id) {
+      tokens.vault_id = locator.vault_id;
+    }
+    if (locator.item_id) {
+      tokens.item_id = locator.item_id;
+    }
+    if (locator.field_id) {
+      tokens.field_id = locator.field_id;
+    }
+
+    return tokens;
+  }
+
+  if (locator.provider_kind === "bitwarden_cli") {
+    const container =
+      locator.collection ??
+      locator.folder ??
+      locator.organization ??
+      locator.account;
+    const tokens: ResourceTemplateTokenMap = {
+      provider_kind: locator.provider_kind,
+      account: locator.account,
+      container,
+      item: locator.item,
+      field: locator.field,
+    };
+
+    if (locator.organization) {
+      tokens.organization = locator.organization;
+    }
+    if (locator.collection) {
+      tokens.collection = locator.collection;
+    }
+    if (locator.folder) {
+      tokens.folder = locator.folder;
+    }
+    if (locator.item_id) {
+      tokens.item_id = locator.item_id;
+    }
+
+    return tokens;
+  }
+
+  const tokens: ResourceTemplateTokenMap = {
+    provider_kind: locator.provider_kind,
+    file_path: locator.file_path,
+    file_name: pathFileName(locator.file_path),
+    file_stem: pathFileStem(locator.file_path),
+    key: locator.key,
+  };
+
+  if (locator.namespace) {
+    tokens.namespace = locator.namespace;
+    tokens.source_name = locator.namespace;
+  }
+  if (locator.prefix) {
+    tokens.prefix = locator.prefix;
+    if (!tokens.source_name) {
+      tokens.source_name = locator.prefix;
+    }
+  }
+  if (!tokens.source_name) {
+    tokens.source_name = tokens.file_stem || tokens.file_name;
+  }
+
+  return tokens;
+}
+
+function renderGeneratedResource(
+  template: string,
+  tokens: ResourceTemplateTokenMap,
+): ResourcePreviewResult {
+  const missingTokens = Array.from(
+    new Set(
+      Array.from(template.matchAll(/\{\{\s*([a-z0-9_]+)\s*\}\}/gi))
+        .map((match) => match[1])
+        .filter((token) => !(token in tokens)),
+    ),
+  );
+
+  if (missingTokens.length > 0) {
+    return {
+      missingTokens,
+      resource: null,
+    };
+  }
+
+  const rendered = template.replace(
+    /\{\{\s*([a-z0-9_]+)\s*\}\}/gi,
+    (_, token: string) => tokens[token] ?? "",
+  );
+  const normalized = normalizeResourcePath(rendered);
+
+  return {
+    missingTokens: [],
+    resource: normalized.length > 0 ? normalized : null,
+  };
+}
+
+function previewResourceForImport(
+  spec: SecretImportSpec,
+  resourceTemplate: string | null,
+): ResourcePreviewResult {
+  const explicitResource = spec.resource.trim();
+  if (explicitResource.length > 0) {
+    return {
+      missingTokens: [],
+      resource: explicitResource,
+    };
+  }
+
+  const template =
+    resourceTemplate && resourceTemplate.trim().length > 0
+      ? resourceTemplate
+      : defaultResourceTemplateForProvider(spec.source_locator.provider_kind);
+
+  return renderGeneratedResource(
+    template,
+    templateTokensForSourceLocator(spec.source_locator),
+  );
+}
+
+function uniqueValues(values: string[]): string[] {
+  return Array.from(new Set(values));
+}
+
+function batchResourceTemplateForSubmit(
+  mode: ResourceTemplateMode,
+  template: string,
+  explicitResource: string,
+): string | null {
+  if (explicitResource.trim().length > 0 || mode !== "custom") {
+    return null;
+  }
+
+  const trimmed = template.trim();
+  return trimmed.length > 0 ? trimmed : null;
+}
+
+function importBatchPayload(
+  resourceTemplate: string | null,
+  imports: SecretImportSpec[],
+): SecretImportBatchSpec {
+  return {
+    resource_template: resourceTemplate,
+    imports,
+  };
+}
+
+function optionById<T extends { id: string }>(
+  options: T[],
+  nextId: string | null,
+): T | null {
+  if (!nextId) {
+    return null;
+  }
+
+  return options.find((option) => option.id === nextId) ?? null;
+}
+
+function hasCachedFieldOptions(
+  cache: FieldOptionsByResourceId,
+  resourceId: string,
+): boolean {
+  return Object.prototype.hasOwnProperty.call(cache, resourceId);
+}
+
+function toggleSelection(
+  current: string[],
+  id: string,
+  selectionMode: "single" | "multi",
+): string[] {
+  if (selectionMode === "single") {
+    return current[0] === id ? [] : [id];
+  }
+
+  if (current.includes(id)) {
+    return current.filter((entry) => entry !== id);
+  }
+
+  return [...current, id];
+}
+
 function matchesQuery(
   option: PickerRenderableOption,
   query: string | undefined,
@@ -189,6 +564,10 @@ function fieldOptionId(field: ImportFieldOption): string {
   return field.field_id ?? field.selector;
 }
 
+function dotenvKeySelectionId(option: DotenvKeyOption): string {
+  return `${option.group_id}:${option.full_key}`;
+}
+
 function searchPlaceholder(locale: Locale, label: string): string {
   return locale === "zh-CN" ? `搜索${label}` : `Search ${label.toLowerCase()}`;
 }
@@ -199,69 +578,6 @@ function sectionCaption(
   chinese: string,
 ): string {
   return locale === "zh-CN" ? chinese : english;
-}
-
-function buildSourceLocator(
-  providerKind: SecretImportProviderKind,
-  onePasswordDraft: OnePasswordDraft,
-  bitwardenDraft: BitwardenDraft,
-  dotenvDraft: DotenvDraft,
-): SecretSourceLocator {
-  if (providerKind === "1password_cli") {
-    return {
-      provider_kind: "1password_cli",
-      account: onePasswordDraft.account.trim(),
-      account_id: optionalValue(onePasswordDraft.accountId),
-      vault: onePasswordDraft.vault.trim(),
-      item: onePasswordDraft.item.trim(),
-      field: onePasswordDraft.field.trim(),
-      vault_id: optionalValue(onePasswordDraft.vaultId),
-      item_id: optionalValue(onePasswordDraft.itemId),
-      field_id: optionalValue(onePasswordDraft.fieldId),
-    } satisfies OnePasswordCliLocator;
-  }
-
-  if (providerKind === "bitwarden_cli") {
-    return {
-      provider_kind: "bitwarden_cli",
-      account: bitwardenDraft.account.trim(),
-      organization: optionalValue(bitwardenDraft.organization),
-      collection: optionalValue(bitwardenDraft.collection),
-      folder: optionalValue(bitwardenDraft.folder),
-      item: bitwardenDraft.item.trim(),
-      field: bitwardenDraft.field.trim(),
-      item_id: optionalValue(bitwardenDraft.itemId),
-    } satisfies BitwardenCliLocator;
-  }
-
-  return {
-    provider_kind: "dotenv_file",
-    file_path: dotenvDraft.filePath.trim(),
-    namespace: optionalValue(dotenvDraft.namespace),
-    prefix: optionalValue(dotenvDraft.prefix),
-    key: dotenvDraft.key.trim(),
-  } satisfies DotenvFileLocator;
-}
-
-function buildImportSpec(options: {
-  providerKind: SecretImportProviderKind;
-  commonDraft: CommonImportDraft;
-  onePasswordDraft: OnePasswordDraft;
-  bitwardenDraft: BitwardenDraft;
-  dotenvDraft: DotenvDraft;
-}): SecretImportSpec {
-  return {
-    resource: options.commonDraft.resource.trim(),
-    display_name: optionalValue(options.commonDraft.displayName),
-    description: optionalValue(options.commonDraft.description),
-    tags: parseTags(options.commonDraft.tags),
-    source_locator: buildSourceLocator(
-      options.providerKind,
-      options.onePasswordDraft,
-      options.bitwardenDraft,
-      options.dotenvDraft,
-    ),
-  };
 }
 
 function getImportedContainerLabel(
@@ -289,39 +605,6 @@ function getImportedFieldSelector(reference: ImportedSecretReference): string {
   }
 
   return reference.field;
-}
-
-function canSubmitImport(
-  providerKind: SecretImportProviderKind,
-  commonDraft: CommonImportDraft,
-  onePasswordDraft: OnePasswordDraft,
-  bitwardenDraft: BitwardenDraft,
-  dotenvDraft: DotenvDraft,
-): boolean {
-  if (commonDraft.resource.trim().length === 0) {
-    return false;
-  }
-
-  if (providerKind === "1password_cli") {
-    return (
-      onePasswordDraft.account.trim().length > 0 &&
-      onePasswordDraft.vault.trim().length > 0 &&
-      onePasswordDraft.item.trim().length > 0 &&
-      onePasswordDraft.field.trim().length > 0
-    );
-  }
-
-  if (providerKind === "bitwarden_cli") {
-    return (
-      bitwardenDraft.account.trim().length > 0 &&
-      bitwardenDraft.item.trim().length > 0 &&
-      bitwardenDraft.field.trim().length > 0
-    );
-  }
-
-  return (
-    dotenvDraft.filePath.trim().length > 0 && dotenvDraft.key.trim().length > 0
-  );
 }
 
 function PickerSection(props: PickerSectionProps): JSX.Element {
@@ -392,6 +675,80 @@ function PickerSection(props: PickerSectionProps): JSX.Element {
   );
 }
 
+function MultiPickerSection(props: MultiPickerSectionProps): JSX.Element {
+  const visibleOptions = props.options.filter((option) =>
+    matchesQuery(option, props.searchQuery),
+  );
+
+  return (
+    <section className="detail-section" data-testid={props.dataTestId}>
+      <div className="detail-section-header">
+        <h3>{props.title}</h3>
+        {props.caption ? <span>{props.caption}</span> : null}
+      </div>
+      {props.helper ? (
+        <p className="section-copy" data-testid={`${props.dataTestId}-helper`}>
+          {props.helper}
+        </p>
+      ) : null}
+      {props.onSearchQueryChange ? (
+        <input
+          className="settings-input picker-search"
+          data-testid={`${props.dataTestId}-search`}
+          onChange={(event) => {
+            props.onSearchQueryChange?.(event.currentTarget.value);
+          }}
+          placeholder={props.searchPlaceholder}
+          type="search"
+          value={props.searchQuery ?? ""}
+        />
+      ) : null}
+      <div
+        className="queue-list picker-list"
+        data-testid={`${props.dataTestId}-list`}
+      >
+        {props.loading ? (
+          <p className="empty" data-testid={`${props.dataTestId}-loading`}>
+            {props.emptyMessage}
+          </p>
+        ) : visibleOptions.length === 0 ? (
+          <p className="empty" data-testid={`${props.dataTestId}-empty`}>
+            {props.emptyMessage}
+          </p>
+        ) : (
+          visibleOptions.map((option) => {
+            const isActive = props.selectedIds.includes(option.id);
+            return (
+              <button
+                aria-pressed={isActive ? "true" : "false"}
+                className={`queue-item ${isActive ? "active" : ""}`}
+                data-option-id={option.id}
+                data-selected={isActive ? "true" : "false"}
+                data-testid={`${props.dataTestId}-option`}
+                key={option.id}
+                onClick={() => {
+                  props.onToggleSelect(option.id);
+                }}
+                type="button"
+              >
+                <div className="queue-item-header">
+                  <strong>{option.label}</strong>
+                  <span>{isActive ? "Selected" : "Select"}</span>
+                </div>
+                {option.subtitle ? (
+                  <div className="queue-item-meta">
+                    <span>{option.subtitle}</span>
+                  </div>
+                ) : null}
+              </button>
+            );
+          })
+        )}
+      </div>
+    </section>
+  );
+}
+
 function LocatorField(props: LocatorFieldProps): JSX.Element {
   return (
     <label className="settings-field" data-testid={props.dataTestId}>
@@ -403,6 +760,7 @@ function LocatorField(props: LocatorFieldProps): JSX.Element {
       </span>
       <input
         className="settings-input"
+        disabled={props.disabled}
         onChange={(event) => {
           props.onChange(event.currentTarget.value);
         }}
@@ -419,6 +777,9 @@ export function PasswordManagementView(
 ): JSX.Element {
   const [providerKind, setProviderKind] =
     useState<SecretImportProviderKind>("1password_cli");
+  const [resourceTemplateMode, setResourceTemplateMode] =
+    useState<ResourceTemplateMode>("default");
+  const [resourceTemplate, setResourceTemplate] = useState("");
   const [commonDraft, setCommonDraft] =
     useState<CommonImportDraft>(EMPTY_COMMON_DRAFT);
   const [onePasswordDraft, setOnePasswordDraft] = useState<OnePasswordDraft>(
@@ -429,7 +790,9 @@ export function PasswordManagementView(
   );
   const [dotenvDraft, setDotenvDraft] =
     useState<DotenvDraft>(EMPTY_DOTENV_DRAFT);
-  const [receipt, setReceipt] = useState<ImportedSecretReceipt | null>(null);
+  const [receipts, setReceipts] = useState<ImportedSecretReceipt[]>([]);
+  const [importedCatalog, setImportedCatalog] =
+    useState<ImportedSecretCatalog | null>(null);
   const [browseErrorMessage, setBrowseErrorMessage] = useState<string | null>(
     null,
   );
@@ -437,7 +800,14 @@ export function PasswordManagementView(
     null,
   );
   const [noticeMessage, setNoticeMessage] = useState<string | null>(null);
+  const [catalogErrorMessage, setCatalogErrorMessage] = useState<string | null>(
+    null,
+  );
+  const [catalogNoticeMessage, setCatalogNoticeMessage] = useState<
+    string | null
+  >(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const [isCatalogLoading, setIsCatalogLoading] = useState(false);
 
   const [onePasswordAccounts, setOnePasswordAccounts] = useState<
     ImportPickerOption[]
@@ -448,9 +818,8 @@ export function PasswordManagementView(
   const [onePasswordItems, setOnePasswordItems] = useState<
     ImportPickerOption[]
   >([]);
-  const [onePasswordFields, setOnePasswordFields] = useState<
-    ImportFieldOption[]
-  >([]);
+  const [onePasswordFieldsByItemId, setOnePasswordFieldsByItemId] =
+    useState<FieldOptionsByResourceId>({});
   const [selectedOnePasswordAccountId, setSelectedOnePasswordAccountId] =
     useState<string | null>(null);
   const [selectedOnePasswordVaultId, setSelectedOnePasswordVaultId] = useState<
@@ -459,9 +828,14 @@ export function PasswordManagementView(
   const [selectedOnePasswordItemId, setSelectedOnePasswordItemId] = useState<
     string | null
   >(null);
+  const [selectedOnePasswordItemIds, setSelectedOnePasswordItemIds] = useState<
+    string[]
+  >([]);
   const [selectedOnePasswordFieldId, setSelectedOnePasswordFieldId] = useState<
     string | null
   >(null);
+  const [selectedOnePasswordFieldIds, setSelectedOnePasswordFieldIds] =
+    useState<string[]>([]);
   const [onePasswordItemQuery, setOnePasswordItemQuery] = useState("");
   const [isOnePasswordAccountsLoading, setIsOnePasswordAccountsLoading] =
     useState(false);
@@ -481,9 +855,8 @@ export function PasswordManagementView(
   const [bitwardenItems, setBitwardenItems] = useState<ImportPickerOption[]>(
     [],
   );
-  const [bitwardenFields, setBitwardenFields] = useState<ImportFieldOption[]>(
-    [],
-  );
+  const [bitwardenFieldsByItemId, setBitwardenFieldsByItemId] =
+    useState<FieldOptionsByResourceId>({});
   const [selectedBitwardenAccountId, setSelectedBitwardenAccountId] = useState<
     string | null
   >(null);
@@ -492,9 +865,15 @@ export function PasswordManagementView(
   const [selectedBitwardenItemId, setSelectedBitwardenItemId] = useState<
     string | null
   >(null);
+  const [selectedBitwardenItemIds, setSelectedBitwardenItemIds] = useState<
+    string[]
+  >([]);
   const [selectedBitwardenFieldId, setSelectedBitwardenFieldId] = useState<
     string | null
   >(null);
+  const [selectedBitwardenFieldIds, setSelectedBitwardenFieldIds] = useState<
+    string[]
+  >([]);
   const [bitwardenItemQuery, setBitwardenItemQuery] = useState("");
   const [isBitwardenAccountsLoading, setIsBitwardenAccountsLoading] =
     useState(false);
@@ -512,6 +891,7 @@ export function PasswordManagementView(
   const [selectedDotenvKey, setSelectedDotenvKey] = useState<string | null>(
     null,
   );
+  const [selectedDotenvKeys, setSelectedDotenvKeys] = useState<string[]>([]);
   const [dotenvKeyQuery, setDotenvKeyQuery] = useState("");
   const [isDotenvPicking, setIsDotenvPicking] = useState(false);
   const [isDotenvInspecting, setIsDotenvInspecting] = useState(false);
@@ -531,10 +911,9 @@ export function PasswordManagementView(
     onePasswordItems.find(
       (option) => option.id === selectedOnePasswordItemId,
     ) ?? null;
-  const selectedOnePasswordField =
-    onePasswordFields.find(
-      (field) => fieldOptionId(field) === selectedOnePasswordFieldId,
-    ) ?? null;
+  const onePasswordFields: ImportFieldOption[] = selectedOnePasswordItemId
+    ? (onePasswordFieldsByItemId[selectedOnePasswordItemId] ?? [])
+    : [];
   const selectedBitwardenAccount =
     bitwardenAccounts.find(
       (option) => option.id === selectedBitwardenAccountId,
@@ -546,10 +925,9 @@ export function PasswordManagementView(
   const selectedBitwardenItem =
     bitwardenItems.find((option) => option.id === selectedBitwardenItemId) ??
     null;
-  const selectedBitwardenField =
-    bitwardenFields.find(
-      (field) => fieldOptionId(field) === selectedBitwardenFieldId,
-    ) ?? null;
+  const bitwardenFields: ImportFieldOption[] = selectedBitwardenItemId
+    ? (bitwardenFieldsByItemId[selectedBitwardenItemId] ?? [])
+    : [];
   const selectedDotenvGroup =
     dotenvInspection?.groups.find(
       (group) => group.id === selectedDotenvGroupId,
@@ -566,18 +944,335 @@ export function PasswordManagementView(
         dotenvKeyQuery,
       ),
     );
-  const canSubmit = canSubmitImport(
-    providerKind,
-    commonDraft,
-    onePasswordDraft,
-    bitwardenDraft,
-    dotenvDraft,
+  const selectedOnePasswordItems = onePasswordItems.filter((option) =>
+    selectedOnePasswordItemIds.includes(option.id),
   );
+  const selectedOnePasswordFields = onePasswordFields.filter((field) =>
+    selectedOnePasswordFieldIds.includes(fieldOptionId(field)),
+  );
+  const isOnePasswordMultiResourceMode = selectedOnePasswordItemIds.length > 1;
+  const areOnePasswordSelectedFieldsReady =
+    selectedOnePasswordItems.length > 0 &&
+    selectedOnePasswordItems.every((item) =>
+      hasCachedFieldOptions(onePasswordFieldsByItemId, item.id),
+    );
+  const selectedBitwardenItems = bitwardenItems.filter((option) =>
+    selectedBitwardenItemIds.includes(option.id),
+  );
+  const selectedBitwardenFields = bitwardenFields.filter((field) =>
+    selectedBitwardenFieldIds.includes(fieldOptionId(field)),
+  );
+  const isBitwardenMultiResourceMode = selectedBitwardenItemIds.length > 1;
+  const areBitwardenSelectedFieldsReady =
+    selectedBitwardenItems.length > 0 &&
+    selectedBitwardenItems.every((item) =>
+      hasCachedFieldOptions(bitwardenFieldsByItemId, item.id),
+    );
+  const selectedDotenvKeyOptions = (dotenvInspection?.keys ?? []).filter(
+    (option) => selectedDotenvKeys.includes(dotenvKeySelectionId(option)),
+  );
+  const explicitResource = commonDraft.resource.trim();
+  const sharedResourceTemplate = batchResourceTemplateForSubmit(
+    resourceTemplateMode,
+    resourceTemplate,
+    explicitResource,
+  );
+  const resolvedResourceTemplate =
+    resourceTemplateMode === "custom"
+      ? resourceTemplate
+      : defaultResourceTemplateForProvider(providerKind);
+  const metadataDraft = parseMetadataDraft(commonDraft.metadata);
+
+  let plannedSpecs: SecretImportSpec[] = [];
+  let planBlockerMessage: string | null = null;
+
+  if (
+    resourceTemplateMode === "custom" &&
+    commonDraft.resource.trim().length === 0 &&
+    resourceTemplate.trim().length === 0
+  ) {
+    planBlockerMessage = sectionCaption(
+      props.locale,
+      "Custom resource templates cannot be empty.",
+      "自定义资源模板不能为空。",
+    );
+  } else if (metadataDraft.invalidLines.length > 0) {
+    planBlockerMessage = sectionCaption(
+      props.locale,
+      `Metadata must use KEY=VALUE lines: ${metadataDraft.invalidLines.join(", ")}`,
+      `元信息必须使用 KEY=VALUE 格式：${metadataDraft.invalidLines.join("、")}`,
+    );
+  } else if (providerKind === "1password_cli") {
+    if (
+      onePasswordDraft.account.trim().length > 0 &&
+      onePasswordDraft.vault.trim().length > 0 &&
+      selectedOnePasswordItems.length > 0
+    ) {
+      const manualResource = commonDraft.resource.trim();
+      const manualDisplayName = optionalValue(commonDraft.displayName);
+      const description = optionalValue(commonDraft.description);
+      const tags = parseTags(commonDraft.tags);
+      const metadata = metadataDraft.metadata;
+      const isSingleImport =
+        selectedOnePasswordItems.length === 1 &&
+        selectedOnePasswordFields.length === 1;
+
+      if (isOnePasswordMultiResourceMode) {
+        if (areOnePasswordSelectedFieldsReady) {
+          plannedSpecs = selectedOnePasswordItems.flatMap((item) =>
+            (onePasswordFieldsByItemId[item.id] ?? []).map((field) => {
+              return {
+                resource: "",
+                display_name: null,
+                description,
+                tags,
+                metadata,
+                source_locator: {
+                  provider_kind: "1password_cli",
+                  account: onePasswordDraft.account.trim(),
+                  account_id: optionalValue(onePasswordDraft.accountId),
+                  vault: onePasswordDraft.vault.trim(),
+                  vault_id: optionalValue(onePasswordDraft.vaultId),
+                  item: item.label,
+                  item_id: item.id,
+                  field: field.selector,
+                  field_id: optionalValue(field.field_id ?? ""),
+                },
+              } satisfies SecretImportSpec;
+            }),
+          );
+        }
+      } else if (selectedOnePasswordFields.length > 0) {
+        plannedSpecs = selectedOnePasswordItems.flatMap((item) =>
+          selectedOnePasswordFields.map((field) => {
+            return {
+              resource:
+                manualResource.length > 0 && isSingleImport
+                  ? manualResource
+                  : "",
+              display_name: isSingleImport ? manualDisplayName : null,
+              description,
+              tags,
+              metadata,
+              source_locator: {
+                provider_kind: "1password_cli",
+                account: onePasswordDraft.account.trim(),
+                account_id: optionalValue(onePasswordDraft.accountId),
+                vault: onePasswordDraft.vault.trim(),
+                vault_id: optionalValue(onePasswordDraft.vaultId),
+                item: item.label,
+                item_id: item.id,
+                field: field.selector,
+                field_id: optionalValue(field.field_id ?? ""),
+              },
+            } satisfies SecretImportSpec;
+          }),
+        );
+      }
+    }
+  } else if (providerKind === "bitwarden_cli") {
+    if (
+      bitwardenDraft.account.trim().length > 0 &&
+      selectedBitwardenItems.length > 0
+    ) {
+      const manualResource = commonDraft.resource.trim();
+      const manualDisplayName = optionalValue(commonDraft.displayName);
+      const description = optionalValue(commonDraft.description);
+      const tags = parseTags(commonDraft.tags);
+      const metadata = metadataDraft.metadata;
+      const isSingleImport =
+        selectedBitwardenItems.length === 1 &&
+        selectedBitwardenFields.length === 1;
+
+      if (isBitwardenMultiResourceMode) {
+        if (areBitwardenSelectedFieldsReady) {
+          plannedSpecs = selectedBitwardenItems.flatMap((item) =>
+            (bitwardenFieldsByItemId[item.id] ?? []).map((field) => {
+              return {
+                resource: "",
+                display_name: null,
+                description,
+                tags,
+                metadata,
+                source_locator: {
+                  provider_kind: "bitwarden_cli",
+                  account: bitwardenDraft.account.trim(),
+                  organization: optionalValue(bitwardenDraft.organization),
+                  collection: optionalValue(bitwardenDraft.collection),
+                  folder: optionalValue(bitwardenDraft.folder),
+                  item: item.label,
+                  item_id: item.id,
+                  field: field.selector,
+                },
+              } satisfies SecretImportSpec;
+            }),
+          );
+        }
+      } else if (selectedBitwardenFields.length > 0) {
+        plannedSpecs = selectedBitwardenItems.flatMap((item) =>
+          selectedBitwardenFields.map((field) => {
+            return {
+              resource:
+                manualResource.length > 0 && isSingleImport
+                  ? manualResource
+                  : "",
+              display_name: isSingleImport ? manualDisplayName : null,
+              description,
+              tags,
+              metadata,
+              source_locator: {
+                provider_kind: "bitwarden_cli",
+                account: bitwardenDraft.account.trim(),
+                organization: optionalValue(bitwardenDraft.organization),
+                collection: optionalValue(bitwardenDraft.collection),
+                folder: optionalValue(bitwardenDraft.folder),
+                item: item.label,
+                item_id: item.id,
+                field: field.selector,
+              },
+            } satisfies SecretImportSpec;
+          }),
+        );
+      }
+    }
+  } else if (
+    dotenvDraft.filePath.trim().length > 0 &&
+    selectedDotenvKeyOptions.length > 0
+  ) {
+    const manualResource = commonDraft.resource.trim();
+    const manualDisplayName = optionalValue(commonDraft.displayName);
+    const description = optionalValue(commonDraft.description);
+    const tags = parseTags(commonDraft.tags);
+    const metadata = metadataDraft.metadata;
+    const isSingleImport = selectedDotenvKeyOptions.length === 1;
+
+    plannedSpecs = selectedDotenvKeyOptions.map((option) => {
+      const resolvedKey =
+        selectedDotenvGroup?.prefix && option.group_id !== "all"
+          ? option.label
+          : option.full_key;
+
+      return {
+        resource:
+          manualResource.length > 0 && isSingleImport ? manualResource : "",
+        display_name: isSingleImport ? manualDisplayName : null,
+        description,
+        tags,
+        metadata,
+        source_locator: {
+          provider_kind: "dotenv_file",
+          file_path: dotenvDraft.filePath.trim(),
+          namespace: optionalValue(selectedDotenvGroup?.namespace ?? ""),
+          prefix: optionalValue(selectedDotenvGroup?.prefix ?? ""),
+          key: resolvedKey,
+        },
+      } satisfies SecretImportSpec;
+    });
+  }
+
+  const plannedPreviewEntries = plannedSpecs.map((spec) => ({
+    spec,
+    ...previewResourceForImport(spec, sharedResourceTemplate),
+  }));
+
+  if (!planBlockerMessage) {
+    const missingTokens = uniqueValues(
+      plannedPreviewEntries.flatMap((entry) => entry.missingTokens),
+    );
+
+    if (missingTokens.length > 0) {
+      planBlockerMessage = sectionCaption(
+        props.locale,
+        `Template uses unsupported placeholders: ${missingTokens.join(", ")}`,
+        `模板包含不支持的占位符：${missingTokens.join("、")}`,
+      );
+    }
+  }
+
+  if (!planBlockerMessage) {
+    const invalidPreview = plannedPreviewEntries.find(
+      (entry) => entry.resource === null,
+    );
+
+    if (invalidPreview) {
+      planBlockerMessage = sectionCaption(
+        props.locale,
+        "The current template does not produce a valid resource id.",
+        "当前模板没有生成有效的资源标识。",
+      );
+    }
+  }
+
+  if (!planBlockerMessage) {
+    const duplicates = plannedPreviewEntries.reduce<Record<string, number>>(
+      (counts, entry) => {
+        const resource = entry.resource ?? "";
+        counts[resource] = (counts[resource] ?? 0) + 1;
+        return counts;
+      },
+      {},
+    );
+    const duplicateResource = Object.keys(duplicates).find(
+      (resource) => duplicates[resource] > 1,
+    );
+
+    if (duplicateResource) {
+      planBlockerMessage = sectionCaption(
+        props.locale,
+        `Resource template produced duplicate ids: ${duplicateResource}`,
+        `资源模板生成了重复资源标识：${duplicateResource}`,
+      );
+    }
+  }
+
+  const previewResources = plannedPreviewEntries
+    .map((entry) => entry.resource)
+    .filter((resource): resource is string => resource !== null);
+  const previewEmptyMessage =
+    providerKind === "1password_cli" && isOnePasswordMultiResourceMode
+      ? isOnePasswordFieldsLoading || !areOnePasswordSelectedFieldsReady
+        ? sectionCaption(
+            props.locale,
+            "Loading fields for the selected resources.",
+            "正在加载所选资源的字段。",
+          )
+        : sectionCaption(
+            props.locale,
+            "No importable fields were found for the selected resources.",
+            "所选资源没有可导入的字段。",
+          )
+      : providerKind === "bitwarden_cli" && isBitwardenMultiResourceMode
+        ? isBitwardenFieldsLoading || !areBitwardenSelectedFieldsReady
+          ? sectionCaption(
+              props.locale,
+              "Loading fields for the selected resources.",
+              "正在加载所选资源的字段。",
+            )
+          : sectionCaption(
+              props.locale,
+              "No importable fields were found for the selected resources.",
+              "所选资源没有可导入的字段。",
+            )
+        : sectionCaption(
+            props.locale,
+            "Select resources and fields to preview generated ids.",
+            "先选择资源和字段，再预览生成后的资源标识。",
+          );
+  const isBatchMode =
+    plannedSpecs.length > 1 ||
+    selectedOnePasswordItemIds.length > 1 ||
+    selectedOnePasswordFieldIds.length > 1 ||
+    selectedBitwardenItemIds.length > 1 ||
+    selectedBitwardenFieldIds.length > 1 ||
+    selectedDotenvKeys.length > 1;
+  const canSubmit = plannedSpecs.length > 0 && planBlockerMessage === null;
+  const importedReceipts = receipts;
 
   function resetFeedback(): void {
     setBrowseErrorMessage(null);
     setSubmitErrorMessage(null);
     setNoticeMessage(null);
+    setReceipts([]);
   }
 
   function suggestDisplayName(nextDisplayName: string): void {
@@ -593,10 +1288,92 @@ export function PasswordManagementView(
     });
   }
 
+  async function loadImportedCatalog(options?: {
+    silent?: boolean;
+  }): Promise<void> {
+    if (!options?.silent) {
+      setIsCatalogLoading(true);
+    }
+    setCatalogErrorMessage(null);
+
+    try {
+      const nextCatalog = await invoke<ImportedSecretCatalog>(
+        "list_imported_secret_sources",
+      );
+      setImportedCatalog(nextCatalog);
+    } catch (error) {
+      setCatalogErrorMessage(
+        error instanceof Error ? error.message : String(error),
+      );
+    } finally {
+      if (!options?.silent) {
+        setIsCatalogLoading(false);
+      }
+    }
+  }
+
   function handleBrowseError(error: unknown): void {
     setBrowseErrorMessage(
       error instanceof Error ? error.message : String(error),
     );
+  }
+
+  async function saveImportedSecret(
+    update: ImportedSecretReferenceUpdate,
+  ): Promise<void> {
+    setCatalogErrorMessage(null);
+
+    try {
+      const receipt = await invoke<ImportedSecretReceipt>(
+        "update_imported_secret_source",
+        {
+          update,
+        },
+      );
+      setCatalogNoticeMessage(
+        sectionCaption(
+          props.locale,
+          `Saved metadata for ${receipt.reference.resource}`,
+          `已保存 ${receipt.reference.resource} 的元信息`,
+        ),
+      );
+      await loadImportedCatalog({ silent: true });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      setCatalogErrorMessage(message);
+      throw error;
+    }
+  }
+
+  async function deleteImportedSecret(resource: string): Promise<void> {
+    setCatalogErrorMessage(null);
+
+    try {
+      const deleted = await invoke<boolean>("delete_imported_secret_source", {
+        resource,
+      });
+      if (!deleted) {
+        throw new Error(
+          sectionCaption(
+            props.locale,
+            `Imported resource was not found: ${resource}`,
+            `未找到导入资源：${resource}`,
+          ),
+        );
+      }
+      setCatalogNoticeMessage(
+        sectionCaption(
+          props.locale,
+          `Removed import ${resource}`,
+          `已删除导入 ${resource}`,
+        ),
+      );
+      await loadImportedCatalog({ silent: true });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      setCatalogErrorMessage(message);
+      throw error;
+    }
   }
 
   async function submitImport(): Promise<void> {
@@ -605,24 +1382,26 @@ export function PasswordManagementView(
     setNoticeMessage(null);
 
     try {
-      const spec = buildImportSpec({
-        providerKind,
-        commonDraft,
-        onePasswordDraft,
-        bitwardenDraft,
-        dotenvDraft,
-      });
-      const nextReceipt = await invoke<ImportedSecretReceipt>(
-        "import_secret_source",
+      const nextBatchReceipt = await invoke<ImportedSecretBatchReceipt>(
+        "import_secret_sources",
         {
-          spec,
+          spec: importBatchPayload(sharedResourceTemplate, plannedSpecs),
         },
       );
-      setReceipt(nextReceipt);
+      const nextReceipts = nextBatchReceipt.receipts;
+
+      setReceipts(nextReceipts);
+      await loadImportedCatalog({ silent: true });
       setNoticeMessage(
-        t(props.locale, "importSourceSuccess", {
-          resource: nextReceipt.reference.resource,
-        }),
+        nextReceipts.length === 1
+          ? t(props.locale, "importSourceSuccess", {
+              resource: nextReceipts[0].reference.resource,
+            })
+          : sectionCaption(
+              props.locale,
+              `Imported ${nextReceipts.length} resources`,
+              `已导入 ${nextReceipts.length} 个资源`,
+            ),
       );
     } catch (error) {
       setSubmitErrorMessage(
@@ -634,19 +1413,27 @@ export function PasswordManagementView(
   }
 
   function selectOnePasswordAccount(nextAccountId: string): void {
+    applyOnePasswordAccountSelection(nextAccountId, onePasswordAccounts);
+  }
+
+  function applyOnePasswordAccountSelection(
+    nextAccountId: string,
+    options: ImportPickerOption[],
+  ): void {
     if (nextAccountId === selectedOnePasswordAccountId) {
       return;
     }
 
-    const nextAccount =
-      onePasswordAccounts.find((option) => option.id === nextAccountId) ?? null;
+    const nextAccount = optionById(options, nextAccountId);
     setSelectedOnePasswordAccountId(nextAccountId);
     setSelectedOnePasswordVaultId(null);
     setSelectedOnePasswordItemId(null);
+    setSelectedOnePasswordItemIds([]);
     setSelectedOnePasswordFieldId(null);
+    setSelectedOnePasswordFieldIds([]);
     setOnePasswordVaults([]);
     setOnePasswordItems([]);
-    setOnePasswordFields([]);
+    setOnePasswordFieldsByItemId({});
     setOnePasswordItemQuery("");
     setOnePasswordDraft((current) => ({
       ...current,
@@ -662,17 +1449,25 @@ export function PasswordManagementView(
   }
 
   function selectOnePasswordVault(nextVaultId: string): void {
+    applyOnePasswordVaultSelection(nextVaultId, onePasswordVaults);
+  }
+
+  function applyOnePasswordVaultSelection(
+    nextVaultId: string,
+    options: ImportPickerOption[],
+  ): void {
     if (nextVaultId === selectedOnePasswordVaultId) {
       return;
     }
 
-    const nextVault =
-      onePasswordVaults.find((option) => option.id === nextVaultId) ?? null;
+    const nextVault = optionById(options, nextVaultId);
     setSelectedOnePasswordVaultId(nextVaultId);
     setSelectedOnePasswordItemId(null);
+    setSelectedOnePasswordItemIds([]);
     setSelectedOnePasswordFieldId(null);
+    setSelectedOnePasswordFieldIds([]);
     setOnePasswordItems([]);
-    setOnePasswordFields([]);
+    setOnePasswordFieldsByItemId({});
     setOnePasswordItemQuery("");
     setOnePasswordDraft((current) => ({
       ...current,
@@ -685,20 +1480,30 @@ export function PasswordManagementView(
     }));
   }
 
-  function selectOnePasswordItem(nextItemId: string): void {
-    if (nextItemId === selectedOnePasswordItemId) {
-      return;
-    }
+  function toggleOnePasswordItem(nextItemId: string): void {
+    applyOnePasswordItemSelection(nextItemId, onePasswordItems);
+  }
 
-    const nextItem =
-      onePasswordItems.find((option) => option.id === nextItemId) ?? null;
-    setSelectedOnePasswordItemId(nextItemId);
+  function applyOnePasswordItemSelection(
+    nextItemId: string,
+    options: ImportPickerOption[],
+  ): void {
+    const nextSelectedIds = toggleSelection(
+      selectedOnePasswordItemIds,
+      nextItemId,
+      "multi",
+    );
+    const nextPrimaryId = nextSelectedIds.at(-1) ?? null;
+    const nextItem = optionById(options, nextPrimaryId);
+
+    setSelectedOnePasswordItemIds(nextSelectedIds);
+    setSelectedOnePasswordItemId(nextPrimaryId);
     setSelectedOnePasswordFieldId(null);
-    setOnePasswordFields([]);
+    setSelectedOnePasswordFieldIds([]);
     setOnePasswordDraft((current) => ({
       ...current,
-      item: nextItem?.label ?? current.item,
-      itemId: nextItem?.id ?? current.itemId,
+      item: nextItem?.label ?? "",
+      itemId: nextItem?.id ?? "",
       field: "",
       fieldId: "",
     }));
@@ -707,15 +1512,34 @@ export function PasswordManagementView(
     }
   }
 
-  function selectOnePasswordField(nextFieldId: string): void {
+  function toggleOnePasswordField(nextFieldId: string): void {
+    applyOnePasswordFieldSelection(nextFieldId, onePasswordFields);
+  }
+
+  function applyOnePasswordFieldSelection(
+    nextFieldId: string,
+    options: ImportFieldOption[],
+  ): void {
+    const selectionMode =
+      selectedOnePasswordItemIds.length > 1 ? "single" : "multi";
+    const nextSelectedIds = toggleSelection(
+      selectedOnePasswordFieldIds,
+      nextFieldId,
+      selectionMode,
+    );
+    const nextPrimaryId = nextSelectedIds.at(0) ?? null;
     const nextField =
-      onePasswordFields.find((field) => fieldOptionId(field) === nextFieldId) ??
-      null;
-    setSelectedOnePasswordFieldId(nextFieldId);
+      options.find((field) => fieldOptionId(field) === nextPrimaryId) ?? null;
+
+    setSelectedOnePasswordFieldIds(nextSelectedIds);
+    setSelectedOnePasswordFieldId(nextPrimaryId);
     setOnePasswordDraft((current) => ({
       ...current,
-      field: nextField?.selector ?? current.field,
-      fieldId: nextField?.field_id ?? "",
+      field: nextField?.selector ?? "",
+      fieldId:
+        selectedOnePasswordItemIds.length === 1
+          ? (nextField?.field_id ?? "")
+          : "",
     }));
     if (nextField && selectedOnePasswordItem) {
       suggestDisplayName(`${selectedOnePasswordItem.label}:${nextField.label}`);
@@ -723,8 +1547,14 @@ export function PasswordManagementView(
   }
 
   function selectBitwardenAccount(nextAccountId: string): void {
-    const nextAccount =
-      bitwardenAccounts.find((option) => option.id === nextAccountId) ?? null;
+    applyBitwardenAccountSelection(nextAccountId, bitwardenAccounts);
+  }
+
+  function applyBitwardenAccountSelection(
+    nextAccountId: string,
+    options: ImportPickerOption[],
+  ): void {
+    const nextAccount = optionById(options, nextAccountId);
     setSelectedBitwardenAccountId(nextAccountId);
     setBitwardenDraft((current) => ({
       ...current,
@@ -738,8 +1568,10 @@ export function PasswordManagementView(
     }));
     setSelectedBitwardenContainerId("all");
     setSelectedBitwardenItemId(null);
+    setSelectedBitwardenItemIds([]);
     setSelectedBitwardenFieldId(null);
-    setBitwardenFields([]);
+    setSelectedBitwardenFieldIds([]);
+    setBitwardenFieldsByItemId({});
   }
 
   function selectBitwardenContainer(nextContainerId: string): void {
@@ -748,8 +1580,10 @@ export function PasswordManagementView(
       null;
     setSelectedBitwardenContainerId(nextContainerId);
     setSelectedBitwardenItemId(null);
+    setSelectedBitwardenItemIds([]);
     setSelectedBitwardenFieldId(null);
-    setBitwardenFields([]);
+    setSelectedBitwardenFieldIds([]);
+    setBitwardenFieldsByItemId({});
     setBitwardenDraft((current) => ({
       ...current,
       organization:
@@ -765,15 +1599,30 @@ export function PasswordManagementView(
     }));
   }
 
-  function selectBitwardenItem(nextItemId: string): void {
-    const nextItem =
-      bitwardenItems.find((option) => option.id === nextItemId) ?? null;
-    setSelectedBitwardenItemId(nextItemId);
+  function toggleBitwardenItem(nextItemId: string): void {
+    applyBitwardenItemSelection(nextItemId, bitwardenItems);
+  }
+
+  function applyBitwardenItemSelection(
+    nextItemId: string,
+    options: ImportPickerOption[],
+  ): void {
+    const nextSelectedIds = toggleSelection(
+      selectedBitwardenItemIds,
+      nextItemId,
+      "multi",
+    );
+    const nextPrimaryId = nextSelectedIds.at(-1) ?? null;
+    const nextItem = optionById(options, nextPrimaryId);
+
+    setSelectedBitwardenItemIds(nextSelectedIds);
+    setSelectedBitwardenItemId(nextPrimaryId);
     setSelectedBitwardenFieldId(null);
+    setSelectedBitwardenFieldIds([]);
     setBitwardenDraft((current) => ({
       ...current,
-      item: nextItem?.label ?? current.item,
-      itemId: nextItem?.id ?? current.itemId,
+      item: nextItem?.label ?? "",
+      itemId: nextItem?.id ?? "",
       field: "",
     }));
     if (nextItem) {
@@ -781,14 +1630,24 @@ export function PasswordManagementView(
     }
   }
 
-  function selectBitwardenField(nextFieldId: string): void {
+  function toggleBitwardenField(nextFieldId: string): void {
+    const selectionMode =
+      selectedBitwardenItemIds.length > 1 ? "single" : "multi";
+    const nextSelectedIds = toggleSelection(
+      selectedBitwardenFieldIds,
+      nextFieldId,
+      selectionMode,
+    );
+    const nextPrimaryId = nextSelectedIds.at(0) ?? null;
     const nextField =
-      bitwardenFields.find((field) => fieldOptionId(field) === nextFieldId) ??
+      bitwardenFields.find((field) => fieldOptionId(field) === nextPrimaryId) ??
       null;
-    setSelectedBitwardenFieldId(nextFieldId);
+
+    setSelectedBitwardenFieldIds(nextSelectedIds);
+    setSelectedBitwardenFieldId(nextPrimaryId);
     setBitwardenDraft((current) => ({
       ...current,
-      field: nextField?.selector ?? current.field,
+      field: nextField?.selector ?? "",
     }));
     if (nextField && selectedBitwardenItem) {
       suggestDisplayName(`${selectedBitwardenItem.label}:${nextField.label}`);
@@ -801,6 +1660,7 @@ export function PasswordManagementView(
       null;
     setSelectedDotenvGroupId(nextGroupId);
     setSelectedDotenvKey(null);
+    setSelectedDotenvKeys([]);
     setDotenvKeyQuery("");
     setDotenvDraft((current) => ({
       ...current,
@@ -810,17 +1670,33 @@ export function PasswordManagementView(
     }));
   }
 
-  function selectDotenvKey(option: DotenvKeyOption): void {
-    setSelectedDotenvKey(option.full_key);
+  function toggleDotenvKey(option: DotenvKeyOption): void {
+    const nextSelectedIds = toggleSelection(
+      selectedDotenvKeys,
+      dotenvKeySelectionId(option),
+      "multi",
+    );
+    const nextPrimarySelectionId = nextSelectedIds.at(-1) ?? null;
+    const nextPrimaryOption =
+      (dotenvInspection?.keys ?? []).find(
+        (entry) => dotenvKeySelectionId(entry) === nextPrimarySelectionId,
+      ) ?? null;
     const nextKey =
-      selectedDotenvGroup?.prefix && option.group_id !== "all"
-        ? option.label
-        : option.full_key;
+      nextPrimaryOption &&
+      selectedDotenvGroup?.prefix &&
+      nextPrimaryOption.group_id !== "all"
+        ? nextPrimaryOption.label
+        : (nextPrimaryOption?.full_key ?? "");
+
+    setSelectedDotenvKeys(nextSelectedIds);
+    setSelectedDotenvKey(nextPrimarySelectionId);
     setDotenvDraft((current) => ({
       ...current,
       key: nextKey,
     }));
-    suggestDisplayName(nextKey);
+    if (nextKey) {
+      suggestDisplayName(nextKey);
+    }
   }
 
   async function chooseDotenvFile(): Promise<void> {
@@ -842,6 +1718,7 @@ export function PasswordManagementView(
       }));
       setSelectedDotenvGroupId("all");
       setSelectedDotenvKey(null);
+      setSelectedDotenvKeys([]);
       setDotenvKeyQuery("");
     } catch (error) {
       handleBrowseError(error);
@@ -853,6 +1730,10 @@ export function PasswordManagementView(
   useEffect(() => {
     resetFeedback();
   }, [providerKind]);
+
+  useEffect(() => {
+    void loadImportedCatalog();
+  }, []);
 
   useEffect(() => {
     if (providerKind !== "1password_cli") {
@@ -868,7 +1749,7 @@ export function PasswordManagementView(
         }
         setOnePasswordAccounts(accounts);
         if (accounts.length === 1) {
-          selectOnePasswordAccount(accounts[0].id);
+          applyOnePasswordAccountSelection(accounts[0].id, accounts);
         }
       })
       .catch((error) => {
@@ -903,7 +1784,7 @@ export function PasswordManagementView(
         }
         setOnePasswordVaults(vaults);
         if (vaults.length === 1) {
-          selectOnePasswordVault(vaults[0].id);
+          applyOnePasswordVaultSelection(vaults[0].id, vaults);
         }
       })
       .catch((error) => {
@@ -943,7 +1824,7 @@ export function PasswordManagementView(
         }
         setOnePasswordItems(items);
         if (items.length === 1) {
-          selectOnePasswordItem(items[0].id);
+          applyOnePasswordItemSelection(items[0].id, items);
         }
       })
       .catch((error) => {
@@ -967,26 +1848,44 @@ export function PasswordManagementView(
       providerKind !== "1password_cli" ||
       !selectedOnePasswordAccountId ||
       !selectedOnePasswordVaultId ||
-      !selectedOnePasswordItemId
+      selectedOnePasswordItemIds.length === 0
     ) {
+      return;
+    }
+
+    const missingItemIds = selectedOnePasswordItemIds.filter(
+      (itemId) => !hasCachedFieldOptions(onePasswordFieldsByItemId, itemId),
+    );
+    if (missingItemIds.length === 0) {
       return;
     }
 
     let active = true;
     setIsOnePasswordFieldsLoading(true);
-    void invoke<ImportFieldOption[]>("list_onepassword_fields_command", {
-      accountId: selectedOnePasswordAccountId,
-      vaultId: selectedOnePasswordVaultId,
-      itemId: selectedOnePasswordItemId,
-    })
-      .then((fields) => {
+    void Promise.all(
+      missingItemIds.map(async (itemId) => ({
+        itemId,
+        fields: await invoke<ImportFieldOption[]>(
+          "list_onepassword_fields_command",
+          {
+            accountId: selectedOnePasswordAccountId,
+            vaultId: selectedOnePasswordVaultId,
+            itemId,
+          },
+        ),
+      })),
+    )
+      .then((results) => {
         if (!active) {
           return;
         }
-        setOnePasswordFields(fields);
-        if (fields.length === 1) {
-          selectOnePasswordField(fieldOptionId(fields[0]));
-        }
+        setOnePasswordFieldsByItemId((current) => {
+          const next = { ...current };
+          for (const { itemId, fields } of results) {
+            next[itemId] = fields;
+          }
+          return next;
+        });
       })
       .catch((error) => {
         if (active) {
@@ -1006,7 +1905,30 @@ export function PasswordManagementView(
     providerKind,
     selectedOnePasswordAccountId,
     selectedOnePasswordVaultId,
+    selectedOnePasswordItemIds,
+    onePasswordFieldsByItemId,
+  ]);
+
+  useEffect(() => {
+    if (
+      providerKind !== "1password_cli" ||
+      !selectedOnePasswordItemId ||
+      selectedOnePasswordItemIds.length !== 1 ||
+      selectedOnePasswordFieldIds.length > 0
+    ) {
+      return;
+    }
+
+    const fields = onePasswordFieldsByItemId[selectedOnePasswordItemId] ?? [];
+    if (fields.length === 1) {
+      applyOnePasswordFieldSelection(fieldOptionId(fields[0]), fields);
+    }
+  }, [
+    onePasswordFieldsByItemId,
+    providerKind,
+    selectedOnePasswordFieldIds.length,
     selectedOnePasswordItemId,
+    selectedOnePasswordItemIds.length,
   ]);
 
   useEffect(() => {
@@ -1025,7 +1947,7 @@ export function PasswordManagementView(
         }
         setBitwardenAccounts(accounts);
         if (accounts.length > 0) {
-          selectBitwardenAccount(accounts[0].id);
+          applyBitwardenAccountSelection(accounts[0].id, accounts);
         }
       })
       .catch((error) => {
@@ -1070,8 +1992,10 @@ export function PasswordManagementView(
     let active = true;
     setIsBitwardenItemsLoading(true);
     setSelectedBitwardenItemId(null);
+    setSelectedBitwardenItemIds([]);
     setSelectedBitwardenFieldId(null);
-    setBitwardenFields([]);
+    setSelectedBitwardenFieldIds([]);
+    setBitwardenFieldsByItemId({});
 
     const container = bitwardenContainers.find(
       (option) => option.id === selectedBitwardenContainerId,
@@ -1089,7 +2013,7 @@ export function PasswordManagementView(
         }
         setBitwardenItems(items);
         if (items.length === 1) {
-          selectBitwardenItem(items[0].id);
+          applyBitwardenItemSelection(items[0].id, items);
         }
       })
       .catch((error) => {
@@ -1114,24 +2038,45 @@ export function PasswordManagementView(
   ]);
 
   useEffect(() => {
-    if (providerKind !== "bitwarden_cli" || !selectedBitwardenItemId) {
+    if (
+      providerKind !== "bitwarden_cli" ||
+      selectedBitwardenItemIds.length === 0
+    ) {
+      return;
+    }
+
+    const missingItemIds = selectedBitwardenItemIds.filter(
+      (itemId) => !hasCachedFieldOptions(bitwardenFieldsByItemId, itemId),
+    );
+    if (missingItemIds.length === 0) {
       return;
     }
 
     let active = true;
     setIsBitwardenFieldsLoading(true);
 
-    void invoke<ImportFieldOption[]>("list_bitwarden_fields_command", {
-      itemId: selectedBitwardenItemId,
-    })
-      .then((fields) => {
+    void Promise.all(
+      missingItemIds.map(async (itemId) => ({
+        itemId,
+        fields: await invoke<ImportFieldOption[]>(
+          "list_bitwarden_fields_command",
+          {
+            itemId,
+          },
+        ),
+      })),
+    )
+      .then((results) => {
         if (!active) {
           return;
         }
-        setBitwardenFields(fields);
-        if (fields.length === 1) {
-          selectBitwardenField(fieldOptionId(fields[0]));
-        }
+        setBitwardenFieldsByItemId((current) => {
+          const next = { ...current };
+          for (const { itemId, fields } of results) {
+            next[itemId] = fields;
+          }
+          return next;
+        });
       })
       .catch((error) => {
         if (active) {
@@ -1147,7 +2092,29 @@ export function PasswordManagementView(
     return () => {
       active = false;
     };
-  }, [providerKind, selectedBitwardenItemId]);
+  }, [bitwardenFieldsByItemId, providerKind, selectedBitwardenItemIds]);
+
+  useEffect(() => {
+    if (
+      providerKind !== "bitwarden_cli" ||
+      !selectedBitwardenItemId ||
+      selectedBitwardenItemIds.length !== 1 ||
+      selectedBitwardenFieldIds.length > 0
+    ) {
+      return;
+    }
+
+    const fields = bitwardenFieldsByItemId[selectedBitwardenItemId] ?? [];
+    if (fields.length === 1) {
+      toggleBitwardenField(fieldOptionId(fields[0]));
+    }
+  }, [
+    bitwardenFieldsByItemId,
+    providerKind,
+    selectedBitwardenFieldIds.length,
+    selectedBitwardenItemId,
+    selectedBitwardenItemIds.length,
+  ]);
 
   useEffect(() => {
     if (
@@ -1212,7 +2179,7 @@ export function PasswordManagementView(
     ),
   }));
   const dotenvKeyOptions = visibleDotenvKeys.map((key) => ({
-    id: key.full_key,
+    id: dotenvKeySelectionId(key),
     label: key.label,
     subtitle: key.full_key !== key.label ? key.full_key : null,
   }));
@@ -1302,25 +2269,66 @@ export function PasswordManagementView(
         >
           <div className="detail-section-header">
             <h3>{t(props.locale, "importDetailsTitle")}</h3>
-            <span>{t(props.locale, "resourceId")}</span>
+            <span>
+              {isBatchMode
+                ? sectionCaption(
+                    props.locale,
+                    `${plannedSpecs.length} imports planned`,
+                    `计划导入 ${plannedSpecs.length} 条`,
+                  )
+                : t(props.locale, "resourceId")}
+            </span>
           </div>
-          <p className="section-copy">{t(props.locale, "importDetailsHelp")}</p>
+          <p className="section-copy">
+            {isBatchMode
+              ? sectionCaption(
+                  props.locale,
+                  "Resource id and display name stay optional. Batch mode uses generated resource ids for each import.",
+                  "资源标识和显示名都可留空；批量模式会为每条导入生成默认资源标识。",
+                )
+              : t(props.locale, "importDetailsHelp")}
+          </p>
           <div className="settings-form-grid">
             <LocatorField
               dataTestId="password-field-resource"
               label={t(props.locale, "resourceId")}
+              disabled={isBatchMode}
+              hint={
+                isBatchMode
+                  ? sectionCaption(
+                      props.locale,
+                      "Manual resource ids are only available for single imports. Use the template below for batch imports.",
+                      "手填资源标识仅用于单条导入；批量导入请使用下方模板。",
+                    )
+                  : sectionCaption(
+                      props.locale,
+                      "Leave empty to generate the default resource id automatically.",
+                      "留空时自动生成默认资源标识。",
+                    )
+              }
               onChange={(value) => {
                 setCommonDraft((current) => ({
                   ...current,
                   resource: value,
                 }));
               }}
+              optional
               optionalLabel={t(props.locale, "optional")}
               value={commonDraft.resource}
             />
             <LocatorField
               dataTestId="password-field-display-name"
               label={t(props.locale, "displayName")}
+              disabled={isBatchMode}
+              hint={
+                isBatchMode
+                  ? sectionCaption(
+                      props.locale,
+                      "Batch mode derives display names from each selected resource.",
+                      "批量模式会按每个已选资源自动生成显示名。",
+                    )
+                  : undefined
+              }
               onChange={(value) => {
                 setCommonDraft((current) => ({
                   ...current,
@@ -1345,7 +2353,13 @@ export function PasswordManagementView(
               value={commonDraft.description}
             />
             <label className="settings-field" data-testid="password-field-tags">
-              <span className="field-label">{t(props.locale, "tags")}</span>
+              <span className="field-label">
+                {t(props.locale, "tags")}
+                <span className="field-optional">
+                  {" "}
+                  · {t(props.locale, "optional")}
+                </span>
+              </span>
               <input
                 className="settings-input"
                 onChange={(event) => {
@@ -1358,8 +2372,172 @@ export function PasswordManagementView(
                 type="text"
                 value={commonDraft.tags}
               />
-              <span className="field-hint">{t(props.locale, "tagsHelp")}</span>
+              <span className="field-hint">
+                {sectionCaption(
+                  props.locale,
+                  "Optional. Applied to every generated import in batch mode.",
+                  "可留空；批量模式下会应用到每条生成的导入记录。",
+                )}
+              </span>
             </label>
+            <label
+              className="settings-field settings-field-wide"
+              data-testid="password-field-metadata"
+            >
+              <span className="field-label">
+                {t(props.locale, "metadata")}
+                <span className="field-optional">
+                  {" "}
+                  · {t(props.locale, "optional")}
+                </span>
+              </span>
+              <textarea
+                className="settings-input note-field"
+                onChange={(event) => {
+                  const nextValue = event.currentTarget.value;
+                  setCommonDraft((current) => ({
+                    ...current,
+                    metadata: nextValue,
+                  }));
+                }}
+                placeholder={sectionCaption(
+                  props.locale,
+                  "team=backend\nowner=alice",
+                  "team=backend\nowner=alice",
+                )}
+                value={commonDraft.metadata}
+              />
+              <span className="field-hint">
+                {t(props.locale, "metadataFormatHelp")}
+              </span>
+            </label>
+          </div>
+        </section>
+
+        <section
+          className="detail-section"
+          data-testid="password-template-section"
+        >
+          <div className="detail-section-header">
+            <h3>
+              {sectionCaption(props.locale, "Resource Template", "资源模板")}
+            </h3>
+            <span>
+              {resourceTemplateMode === "default"
+                ? sectionCaption(props.locale, "Default", "默认")
+                : sectionCaption(props.locale, "Custom", "自定义")}
+            </span>
+          </div>
+          <p className="section-copy">
+            {sectionCaption(
+              props.locale,
+              "Default ids are generated from the current provider locator. Switch to a custom template only when you need a different path shape.",
+              "默认资源标识会按当前 provider locator 自动生成；只有在需要不同路径规则时再切到自定义模板。",
+            )}
+          </p>
+          <div
+            className="provider-option-list"
+            data-testid="password-template-mode-options"
+          >
+            <button
+              aria-pressed={
+                resourceTemplateMode === "default" ? "true" : "false"
+              }
+              className={`provider-option ${
+                resourceTemplateMode === "default" ? "active" : ""
+              }`}
+              data-testid="password-template-mode-default"
+              onClick={() => {
+                setResourceTemplateMode("default");
+              }}
+              type="button"
+            >
+              <strong>
+                {sectionCaption(props.locale, "Default Rule", "默认规则")}
+              </strong>
+              <p>{defaultResourceTemplateForProvider(providerKind)}</p>
+            </button>
+            <button
+              aria-pressed={
+                resourceTemplateMode === "custom" ? "true" : "false"
+              }
+              className={`provider-option ${
+                resourceTemplateMode === "custom" ? "active" : ""
+              }`}
+              data-testid="password-template-mode-custom"
+              onClick={() => {
+                setResourceTemplateMode("custom");
+              }}
+              type="button"
+            >
+              <strong>
+                {sectionCaption(props.locale, "Custom Template", "自定义模板")}
+              </strong>
+              <p>
+                {sectionCaption(
+                  props.locale,
+                  "Use placeholders such as {{ item }} or {{ field }}",
+                  "使用 {{ item }} / {{ field }} 等占位符",
+                )}
+              </p>
+            </button>
+          </div>
+          {resourceTemplateMode === "custom" ? (
+            <LocatorField
+              dataTestId="password-field-resource-template"
+              hint={sectionCaption(
+                props.locale,
+                `Supported placeholders: ${availableTemplateTokens(providerKind).join(", ")}`,
+                `支持的占位符：${availableTemplateTokens(providerKind).join("、")}`,
+              )}
+              label={sectionCaption(props.locale, "Template", "模板")}
+              onChange={setResourceTemplate}
+              optionalLabel={t(props.locale, "optional")}
+              value={resourceTemplate}
+            />
+          ) : null}
+          <div
+            className="detail-section detail-section-low"
+            data-testid="password-template-preview"
+          >
+            <div className="detail-section-header">
+              <h3>
+                {sectionCaption(props.locale, "Import Preview", "导入预览")}
+              </h3>
+              <span>
+                {sectionCaption(
+                  props.locale,
+                  `${plannedSpecs.length} target(s)`,
+                  `${plannedSpecs.length} 个目标`,
+                )}
+              </span>
+            </div>
+            {planBlockerMessage ? (
+              <p
+                className="empty"
+                data-testid="password-template-preview-blocker"
+              >
+                {planBlockerMessage}
+              </p>
+            ) : plannedSpecs.length === 0 ? (
+              <p
+                className="empty"
+                data-testid="password-template-preview-empty"
+              >
+                {previewEmptyMessage}
+              </p>
+            ) : (
+              <ol
+                className="boundary-list"
+                data-testid="password-template-preview-list"
+              >
+                {previewResources.slice(0, 6).map((resource) => (
+                  <li key={resource}>
+                    <code>{resource}</code>
+                  </li>
+                ))}
+              </ol>
+            )}
           </div>
         </section>
 
@@ -1421,11 +2599,11 @@ export function PasswordManagementView(
               title={t(props.locale, "vault")}
             />
 
-            <PickerSection
+            <MultiPickerSection
               caption={sectionCaption(
                 props.locale,
-                "Searchable list",
-                "支持搜索",
+                `${selectedOnePasswordItemIds.length} selected`,
+                `已选 ${selectedOnePasswordItemIds.length} 个`,
               )}
               dataTestId="onepassword-item-picker"
               emptyMessage={
@@ -1447,49 +2625,70 @@ export function PasswordManagementView(
                       "先选择保险库",
                     )
               }
+              helper={sectionCaption(
+                props.locale,
+                isOnePasswordMultiResourceMode
+                  ? "All fields from the selected resources will be imported."
+                  : "Single-resource mode supports selecting specific fields from the current resource.",
+                isOnePasswordMultiResourceMode
+                  ? "当前会导入所选资源的全部字段。"
+                  : "单资源模式支持从当前资源中选择指定字段。",
+              )}
               loading={isOnePasswordItemsLoading}
               onSearchQueryChange={setOnePasswordItemQuery}
-              onSelect={selectOnePasswordItem}
+              onToggleSelect={toggleOnePasswordItem}
               options={onePasswordItems}
               searchPlaceholder={searchPlaceholder(
                 props.locale,
                 t(props.locale, "item"),
               )}
               searchQuery={onePasswordItemQuery}
-              selectedId={selectedOnePasswordItemId}
+              selectedIds={selectedOnePasswordItemIds}
               title={t(props.locale, "item")}
             />
 
-            <PickerSection
-              caption={sectionCaption(props.locale, "Field picker", "字段选择")}
-              dataTestId="onepassword-field-picker"
-              emptyMessage={
-                selectedOnePasswordItemId
-                  ? isOnePasswordFieldsLoading
-                    ? sectionCaption(
-                        props.locale,
-                        "Loading fields",
-                        "加载字段中",
-                      )
+            {!isOnePasswordMultiResourceMode ? (
+              <MultiPickerSection
+                caption={sectionCaption(
+                  props.locale,
+                  `${selectedOnePasswordFieldIds.length} selected`,
+                  `已选 ${selectedOnePasswordFieldIds.length} 个`,
+                )}
+                dataTestId="onepassword-field-picker"
+                emptyMessage={
+                  selectedOnePasswordItemId
+                    ? isOnePasswordFieldsLoading
+                      ? sectionCaption(
+                          props.locale,
+                          "Loading fields",
+                          "加载字段中",
+                        )
+                      : sectionCaption(
+                          props.locale,
+                          "No fields available",
+                          "没有可用字段",
+                        )
                     : sectionCaption(
                         props.locale,
-                        "No fields available",
-                        "没有可用字段",
+                        "Select an item first",
+                        "先选择条目",
                       )
-                  : sectionCaption(
-                      props.locale,
-                      "Select an item first",
-                      "先选择条目",
-                    )
-              }
-              loading={isOnePasswordFieldsLoading}
-              onSelect={selectOnePasswordField}
-              options={onePasswordFieldOptions}
-              selectedId={selectedOnePasswordFieldId}
-              title={t(props.locale, "field")}
-            />
+                }
+                helper={sectionCaption(
+                  props.locale,
+                  "Single-resource mode supports selecting multiple fields from the same resource.",
+                  "单资源模式支持对同一个资源多选字段。",
+                )}
+                loading={isOnePasswordFieldsLoading}
+                onToggleSelect={toggleOnePasswordField}
+                options={onePasswordFieldOptions}
+                selectedIds={selectedOnePasswordFieldIds}
+                title={t(props.locale, "field")}
+              />
+            ) : null}
 
-            {selectedOnePasswordItemId &&
+            {!isOnePasswordMultiResourceMode &&
+            selectedOnePasswordItemId &&
             onePasswordFieldOptions.length === 0 ? (
               <section
                 className="detail-section detail-section-low"
@@ -1583,11 +2782,11 @@ export function PasswordManagementView(
               title={sectionCaption(props.locale, "Container", "容器")}
             />
 
-            <PickerSection
+            <MultiPickerSection
               caption={sectionCaption(
                 props.locale,
-                "Searchable item list",
-                "支持搜索",
+                `${selectedBitwardenItemIds.length} selected`,
+                `已选 ${selectedBitwardenItemIds.length} 个`,
               )}
               dataTestId="bitwarden-item-picker"
               emptyMessage={
@@ -1599,76 +2798,102 @@ export function PasswordManagementView(
                       "没有找到条目",
                     )
               }
+              helper={sectionCaption(
+                props.locale,
+                isBitwardenMultiResourceMode
+                  ? "All fields from the selected resources will be imported."
+                  : "Single-resource mode supports selecting specific fields from the current resource.",
+                isBitwardenMultiResourceMode
+                  ? "当前会导入所选资源的全部字段。"
+                  : "单资源模式支持从当前资源中选择指定字段。",
+              )}
               loading={isBitwardenItemsLoading}
               onSearchQueryChange={setBitwardenItemQuery}
-              onSelect={selectBitwardenItem}
+              onToggleSelect={toggleBitwardenItem}
               options={bitwardenItems}
               searchPlaceholder={searchPlaceholder(
                 props.locale,
                 t(props.locale, "item"),
               )}
               searchQuery={bitwardenItemQuery}
-              selectedId={selectedBitwardenItemId}
+              selectedIds={selectedBitwardenItemIds}
               title={t(props.locale, "item")}
             />
 
-            <PickerSection
-              caption={sectionCaption(props.locale, "Field picker", "字段选择")}
-              dataTestId="bitwarden-field-picker"
-              emptyMessage={
-                selectedBitwardenItemId
-                  ? isBitwardenFieldsLoading
-                    ? sectionCaption(
-                        props.locale,
-                        "Loading fields",
-                        "加载字段中",
-                      )
-                    : sectionCaption(
-                        props.locale,
-                        "No field suggestions",
-                        "没有可用字段",
-                      )
-                  : sectionCaption(
-                      props.locale,
-                      "Select an item first",
-                      "先选择条目",
-                    )
-              }
-              loading={isBitwardenFieldsLoading}
-              onSelect={selectBitwardenField}
-              options={bitwardenFieldOptions}
-              selectedId={selectedBitwardenFieldId}
-              title={t(props.locale, "field")}
-            />
+            {!isBitwardenMultiResourceMode ? (
+              <>
+                <MultiPickerSection
+                  caption={sectionCaption(
+                    props.locale,
+                    `${selectedBitwardenFieldIds.length} selected`,
+                    `已选 ${selectedBitwardenFieldIds.length} 个`,
+                  )}
+                  dataTestId="bitwarden-field-picker"
+                  emptyMessage={
+                    selectedBitwardenItemId
+                      ? isBitwardenFieldsLoading
+                        ? sectionCaption(
+                            props.locale,
+                            "Loading fields",
+                            "加载字段中",
+                          )
+                        : sectionCaption(
+                            props.locale,
+                            "No field suggestions",
+                            "没有可用字段",
+                          )
+                      : sectionCaption(
+                          props.locale,
+                          "Select an item first",
+                          "先选择条目",
+                        )
+                  }
+                  helper={sectionCaption(
+                    props.locale,
+                    "Single-resource mode supports selecting multiple fields from the same resource.",
+                    "单资源模式支持对同一个资源多选字段。",
+                  )}
+                  loading={isBitwardenFieldsLoading}
+                  onToggleSelect={toggleBitwardenField}
+                  options={bitwardenFieldOptions}
+                  selectedIds={selectedBitwardenFieldIds}
+                  title={t(props.locale, "field")}
+                />
 
-            <section
-              className="detail-section detail-section-low"
-              data-testid="bitwarden-field-fallback"
-            >
-              <div className="detail-section-header">
-                <h3>{t(props.locale, "field")}</h3>
-                <span>
-                  {sectionCaption(props.locale, "Minimal fallback", "最小兜底")}
-                </span>
-              </div>
-              <LocatorField
-                dataTestId="password-field-bitwarden-field"
-                hint={sectionCaption(
-                  props.locale,
-                  "Keep a manual field fallback for custom names not returned by the CLI picker.",
-                  "对 CLI picker 没列出的自定义字段保留最小手填兜底。",
-                )}
-                label={t(props.locale, "field")}
-                onChange={(value) => {
-                  setBitwardenDraft((current) => ({
-                    ...current,
-                    field: value,
-                  }));
-                }}
-                optionalLabel={t(props.locale, "optional")}
-                value={bitwardenDraft.field}
-              />
-            </section>
+                <section
+                  className="detail-section detail-section-low"
+                  data-testid="bitwarden-field-fallback"
+                >
+                  <div className="detail-section-header">
+                    <h3>{t(props.locale, "field")}</h3>
+                    <span>
+                      {sectionCaption(
+                        props.locale,
+                        "Minimal fallback",
+                        "最小兜底",
+                      )}
+                    </span>
+                  </div>
+                  <LocatorField
+                    dataTestId="password-field-bitwarden-field"
+                    hint={sectionCaption(
+                      props.locale,
+                      "Keep a manual field fallback for custom names not returned by the CLI picker.",
+                      "对 CLI picker 没列出的自定义字段保留最小手填兜底。",
+                    )}
+                    label={t(props.locale, "field")}
+                    onChange={(value) => {
+                      setBitwardenDraft((current) => ({
+                        ...current,
+                        field: value,
+                      }));
+                    }}
+                    optionalLabel={t(props.locale, "optional")}
+                    value={bitwardenDraft.field}
+                  />
+                </section>
+              </>
+            ) : null}
           </>
         ) : null}
 
@@ -1757,8 +2982,12 @@ export function PasswordManagementView(
               title={sectionCaption(props.locale, "Import Range", "导入范围")}
             />
 
-            <PickerSection
-              caption={sectionCaption(props.locale, "Key list", "Key 列表")}
+            <MultiPickerSection
+              caption={sectionCaption(
+                props.locale,
+                `${selectedDotenvKeys.length} selected`,
+                `已选 ${selectedDotenvKeys.length} 个`,
+              )}
               dataTestId="dotenv-key-picker"
               emptyMessage={
                 selectedDotenvGroupId
@@ -1779,15 +3008,20 @@ export function PasswordManagementView(
                       "先选择分组",
                     )
               }
+              helper={sectionCaption(
+                props.locale,
+                "Keys can be multi-selected. The UI still shows only key names and never renders values.",
+                "支持多选 key；UI 仍然只展示 key 名，不展示 value。",
+              )}
               loading={isDotenvInspecting}
               onSearchQueryChange={setDotenvKeyQuery}
-              onSelect={(nextKey) => {
+              onToggleSelect={(nextKey) => {
                 const option =
-                  visibleDotenvKeys.find(
-                    (entry) => entry.full_key === nextKey,
+                  (dotenvInspection?.keys ?? []).find(
+                    (entry) => dotenvKeySelectionId(entry) === nextKey,
                   ) ?? null;
                 if (option) {
-                  selectDotenvKey(option);
+                  toggleDotenvKey(option);
                 }
               }}
               options={dotenvKeyOptions}
@@ -1796,7 +3030,7 @@ export function PasswordManagementView(
                 t(props.locale, "key"),
               )}
               searchQuery={dotenvKeyQuery}
-              selectedId={selectedDotenvKey}
+              selectedIds={selectedDotenvKeys}
               title={t(props.locale, "key")}
             />
           </>
@@ -1819,6 +3053,11 @@ export function PasswordManagementView(
       </div>
 
       <div className="password-actions" data-testid="password-import-actions">
+        {planBlockerMessage ? (
+          <p className="empty" data-testid="password-import-blocker">
+            {planBlockerMessage}
+          </p>
+        ) : null}
         <button
           className="primary"
           data-testid="password-import-submit"
@@ -1830,11 +3069,13 @@ export function PasswordManagementView(
         >
           {isSubmitting
             ? t(props.locale, "importingSource")
-            : t(props.locale, "importSource")}
+            : isBatchMode
+              ? sectionCaption(props.locale, "Import Selected", "导入所选项")
+              : t(props.locale, "importSource")}
         </button>
       </div>
 
-      {receipt ? (
+      {importedReceipts.length > 0 ? (
         <section
           className="detail-section detail-section-wide"
           data-testid="password-import-receipt"
@@ -1842,34 +3083,50 @@ export function PasswordManagementView(
           <div className="detail-section-header">
             <h3>{t(props.locale, "importReceiptTitle")}</h3>
             <span>
-              {translateCode(props.locale, receipt.reference.provider_kind)}
+              {sectionCaption(
+                props.locale,
+                `${importedReceipts.length} receipt(s)`,
+                `${importedReceipts.length} 条回执`,
+              )}
             </span>
           </div>
+          {importedReceipts.length > 1 ? (
+            <ol
+              className="boundary-list"
+              data-testid="password-import-receipt-list"
+            >
+              {importedReceipts.map((entry) => (
+                <li key={entry.reference.resource}>
+                  <code>{entry.reference.resource}</code>
+                </li>
+              ))}
+            </ol>
+          ) : null}
           <dl className="facts">
             <div data-testid="password-receipt-resource">
               <dt>{t(props.locale, "importedResource")}</dt>
-              <dd>{receipt.reference.resource}</dd>
+              <dd>{importedReceipts[0].reference.resource}</dd>
             </div>
             <div data-testid="password-receipt-catalog-path">
               <dt>{t(props.locale, "catalogPath")}</dt>
-              <dd>{receipt.catalog_path}</dd>
+              <dd>{importedReceipts[0].catalog_path}</dd>
             </div>
             <div data-testid="password-receipt-container">
               <dt>{t(props.locale, "importedContainer")}</dt>
               <dd>
-                {getImportedContainerLabel(receipt.reference) ??
+                {getImportedContainerLabel(importedReceipts[0].reference) ??
                   t(props.locale, "notAvailable")}
               </dd>
             </div>
             <div data-testid="password-receipt-field">
               <dt>{t(props.locale, "importedField")}</dt>
-              <dd>{getImportedFieldSelector(receipt.reference)}</dd>
+              <dd>{getImportedFieldSelector(importedReceipts[0].reference)}</dd>
             </div>
             <div data-testid="password-receipt-imported-at">
               <dt>{t(props.locale, "importedAt")}</dt>
               <dd>
                 {formatTimestamp(
-                  receipt.reference.imported_at,
+                  importedReceipts[0].reference.imported_at,
                   t(props.locale, "notAvailable"),
                   props.locale,
                 )}
@@ -1878,6 +3135,17 @@ export function PasswordManagementView(
           </dl>
         </section>
       ) : null}
+
+      <ImportedSecretCatalogPanel
+        catalog={importedCatalog}
+        errorMessage={catalogErrorMessage}
+        isLoading={isCatalogLoading}
+        locale={props.locale}
+        noticeMessage={catalogNoticeMessage}
+        onDelete={deleteImportedSecret}
+        onReload={loadImportedCatalog}
+        onSave={saveImportedSecret}
+      />
     </section>
   );
 }

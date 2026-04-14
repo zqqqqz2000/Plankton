@@ -180,7 +180,13 @@ export type SecretImportSpec = {
   display_name: string | null;
   description: string | null;
   tags: string[];
+  metadata?: Record<string, string>;
   source_locator: SecretSourceLocator;
+};
+
+export type SecretImportBatchSpec = {
+  resource_template?: string | null;
+  imports: SecretImportSpec[];
 };
 
 type ImportedSecretReferenceBase = {
@@ -188,6 +194,7 @@ type ImportedSecretReferenceBase = {
   display_name: string;
   description?: string | null;
   tags: string[];
+  metadata?: Record<string, string>;
   imported_at: string;
   last_verified_at?: string | null;
 };
@@ -200,6 +207,24 @@ export type ImportedSecretReference =
 export type ImportedSecretReceipt = {
   catalog_path: string;
   reference: ImportedSecretReference;
+};
+
+export type ImportedSecretBatchReceipt = {
+  catalog_path: string;
+  receipts: ImportedSecretReceipt[];
+};
+
+export type ImportedSecretCatalog = {
+  catalog_path: string;
+  imports: ImportedSecretReference[];
+};
+
+export type ImportedSecretReferenceUpdate = {
+  resource: string;
+  display_name: string | null;
+  description: string | null;
+  tags: string[];
+  metadata: Record<string, string>;
 };
 
 export type ImportPickerOption = {

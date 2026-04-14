@@ -10,9 +10,12 @@ use import_browse::{
     DotenvInspection, ImportFieldOption, ImportPickerOption,
 };
 use plankton_core::{
-    import_secret_reference, load_settings, preview_call_chain_for_desktop,
-    save_user_default_policy_mode, save_user_settings, AccessRequest, DashboardData, Decision,
-    ImportedSecretReceipt, PlanktonSettings, PolicyMode, SecretImportSpec, UserSettings,
+    delete_imported_secret_reference, import_secret_reference, import_secret_references,
+    list_imported_secret_references, load_settings, preview_call_chain_for_desktop,
+    save_user_default_policy_mode, save_user_settings, update_imported_secret_reference,
+    AccessRequest, DashboardData, Decision, ImportedSecretBatchReceipt, ImportedSecretCatalog,
+    ImportedSecretReceipt, ImportedSecretReferenceUpdate, PlanktonSettings, PolicyMode,
+    SecretImportBatchSpec, SecretImportSpec, UserSettings,
 };
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, Listener, Manager, Runtime, State};
@@ -232,6 +235,30 @@ async fn import_secret_source(spec: SecretImportSpec) -> Result<ImportedSecretRe
 }
 
 #[tauri::command]
+async fn import_secret_sources(
+    spec: SecretImportBatchSpec,
+) -> Result<ImportedSecretBatchReceipt, String> {
+    import_secret_references(spec).map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+async fn list_imported_secret_sources() -> Result<ImportedSecretCatalog, String> {
+    list_imported_secret_references().map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+async fn update_imported_secret_source(
+    update: ImportedSecretReferenceUpdate,
+) -> Result<ImportedSecretReceipt, String> {
+    update_imported_secret_reference(update).map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+async fn delete_imported_secret_source(resource: String) -> Result<bool, String> {
+    delete_imported_secret_reference(resource.as_str()).map_err(|error| error.to_string())
+}
+
+#[tauri::command]
 async fn list_onepassword_accounts_command() -> Result<Vec<ImportPickerOption>, String> {
     run_import_browse_task(list_onepassword_accounts).await
 }
@@ -378,6 +405,10 @@ fn run() -> Result<()> {
             set_default_policy_mode,
             save_desktop_settings,
             import_secret_source,
+            import_secret_sources,
+            list_imported_secret_sources,
+            update_imported_secret_source,
+            delete_imported_secret_source,
             list_onepassword_accounts_command,
             list_onepassword_vaults_command,
             list_onepassword_items_command,

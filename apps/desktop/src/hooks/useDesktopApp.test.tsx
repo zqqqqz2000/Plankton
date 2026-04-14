@@ -19,7 +19,11 @@ vi.mock("@tauri-apps/api/event", () => ({
 }));
 
 import App from "../App";
-import type { DashboardData, DesktopSettings } from "../types";
+import type {
+  DashboardData,
+  DesktopSettings,
+  ImportedSecretCatalog,
+} from "../types";
 
 Object.assign(globalThis, {
   IS_REACT_ACT_ENVIRONMENT: true,
@@ -47,6 +51,11 @@ const SETTINGS: DesktopSettings = {
   acp_codex_program: "npx",
   acp_codex_args: "-y @zed-industries/codex-acp@0.11.1",
   acp_timeout_secs: 20,
+};
+
+const EMPTY_IMPORTED_CATALOG = {
+  catalog_path: "/tmp/plankton-secrets.toml",
+  imports: [],
 };
 
 const DASHBOARD: DashboardData = {
@@ -286,6 +295,8 @@ describe("useDesktopApp runtime wiring", () => {
           return SETTINGS;
         case "consume_handoff_request":
           return null;
+        case "list_imported_secret_sources":
+          return EMPTY_IMPORTED_CATALOG;
         case "save_desktop_settings":
           return SETTINGS;
         default:
@@ -354,7 +365,7 @@ describe("useDesktopApp runtime wiring", () => {
     view.unmount();
   });
 
-  it("routes password-management imports through import_secret_source without breaking the approvals shell", async () => {
+  it("routes password-management imports through the batch command without breaking the approvals shell", async () => {
     const dotenvInspection = {
       file_path: "/tmp/app.env",
       groups: [
@@ -401,28 +412,35 @@ describe("useDesktopApp runtime wiring", () => {
           return SETTINGS;
         case "consume_handoff_request":
           return null;
+        case "list_imported_secret_sources":
+          return EMPTY_IMPORTED_CATALOG;
         case "list_onepassword_accounts_command":
           return [];
         case "pick_dotenv_file_command":
           return "/tmp/app.env";
         case "inspect_dotenv_file_command":
           return dotenvInspection;
-        case "import_secret_source":
+        case "import_secret_sources":
           return {
             catalog_path: "catalog/password/env/api_token",
-            reference: {
-              provider_kind: "dotenv_file",
-              resource: "secret/env/API_TOKEN",
-              display_name: "API Token",
-              description: "Imported from dotenv",
-              tags: ["prod", "api"],
-              imported_at: "2026-04-13T05:12:00.000Z",
-              last_verified_at: null,
-              file_path: "/tmp/app.env",
-              namespace: "prod",
-              prefix: "APP_",
-              key: "API_TOKEN",
-            },
+            receipts: [
+              {
+                catalog_path: "catalog/password/env/api_token",
+                reference: {
+                  provider_kind: "dotenv_file",
+                  resource: "secret/env/API_TOKEN",
+                  display_name: "API Token",
+                  description: "Imported from dotenv",
+                  tags: ["prod", "api"],
+                  imported_at: "2026-04-13T05:12:00.000Z",
+                  last_verified_at: null,
+                  file_path: "/tmp/app.env",
+                  namespace: "prod",
+                  prefix: "APP_",
+                  key: "API_TOKEN",
+                },
+              },
+            ],
           };
         case "save_desktop_settings":
           return SETTINGS;
@@ -489,7 +507,11 @@ describe("useDesktopApp runtime wiring", () => {
     await flushReact();
 
     click(
-      getPickerOption(view.container, "dotenv-key-picker", "APP_API_TOKEN"),
+      getPickerOption(
+        view.container,
+        "dotenv-key-picker",
+        "prod-app:APP_API_TOKEN",
+      ),
     );
     await flushReact();
 
@@ -501,22 +523,28 @@ describe("useDesktopApp runtime wiring", () => {
     await flushReact();
 
     const importCall = tauri.invoke.mock.calls.find(
-      ([command]) => command === "import_secret_source",
+      ([command]) => command === "import_secret_sources",
     );
     expect(importCall).toBeDefined();
     expect(importCall?.[1]).toEqual({
       spec: {
-        resource: "secret/env/API_TOKEN",
-        display_name: "API Token",
-        description: "Imported from dotenv",
-        tags: ["prod", "api"],
-        source_locator: {
-          provider_kind: "dotenv_file",
-          file_path: "/tmp/app.env",
-          namespace: "prod",
-          prefix: "APP_",
-          key: "API_TOKEN",
-        },
+        resource_template: null,
+        imports: [
+          {
+            resource: "secret/env/API_TOKEN",
+            display_name: "API Token",
+            description: "Imported from dotenv",
+            tags: ["prod", "api"],
+            metadata: {},
+            source_locator: {
+              provider_kind: "dotenv_file",
+              file_path: "/tmp/app.env",
+              namespace: "prod",
+              prefix: "APP_",
+              key: "API_TOKEN",
+            },
+          },
+        ],
       },
     });
 
@@ -556,6 +584,495 @@ describe("useDesktopApp runtime wiring", () => {
     view.unmount();
   });
 
+  it("generates a default resource id when resource is left empty", async () => {
+    const dotenvInspection = {
+      file_path: "/tmp/app.env",
+      groups: [
+        {
+          id: "prod-app",
+          label: "prod / APP_",
+          namespace: "prod",
+          prefix: "APP_",
+          key_count: 1,
+        },
+      ],
+      keys: [
+        {
+          group_id: "prod-app",
+          label: "API_TOKEN",
+          full_key: "APP_API_TOKEN",
+        },
+      ],
+    };
+
+    tauri.listen.mockImplementation(async () => tauri.unlisten);
+    tauri.invoke.mockImplementation(async (command: string) => {
+      switch (command) {
+        case "dashboard":
+          return DASHBOARD;
+        case "desktop_settings":
+          return SETTINGS;
+        case "consume_handoff_request":
+          return null;
+        case "list_imported_secret_sources":
+          return EMPTY_IMPORTED_CATALOG;
+        case "list_onepassword_accounts_command":
+          return [];
+        case "pick_dotenv_file_command":
+          return "/tmp/app.env";
+        case "inspect_dotenv_file_command":
+          return dotenvInspection;
+        case "import_secret_sources":
+          return {
+            catalog_path: "catalog/password/env/api_token",
+            receipts: [
+              {
+                catalog_path: "catalog/password/env/api_token",
+                reference: {
+                  provider_kind: "dotenv_file",
+                  resource: "secret/prod/secret_demo",
+                  display_name: "API_TOKEN",
+                  description: null,
+                  tags: [],
+                  imported_at: "2026-04-13T05:12:00.000Z",
+                  last_verified_at: null,
+                  file_path: "/tmp/app.env",
+                  namespace: "prod",
+                  prefix: "APP_",
+                  key: "API_TOKEN",
+                },
+              },
+            ],
+          };
+        default:
+          throw new Error(`Unexpected command: ${command}`);
+      }
+    });
+
+    const view = render();
+    await flushReact();
+
+    click(
+      view.container.querySelector<HTMLButtonElement>(
+        '[data-testid="view-tab-password-management"]',
+      ),
+    );
+    await flushReact();
+
+    click(
+      view.container.querySelector<HTMLButtonElement>(
+        '[data-testid="password-provider-option-dotenv_file"]',
+      ),
+    );
+    await clickAsync(
+      view.container.querySelector<HTMLButtonElement>(
+        '[data-testid="dotenv-choose-file-button"]',
+      ),
+    );
+    await flushReact();
+    await flushReact();
+
+    click(getPickerOption(view.container, "dotenv-group-picker", "prod-app"));
+    await flushReact();
+
+    click(
+      getPickerOption(
+        view.container,
+        "dotenv-key-picker",
+        "prod-app:APP_API_TOKEN",
+      ),
+    );
+    await flushReact();
+
+    await clickAsync(
+      view.container.querySelector<HTMLButtonElement>(
+        '[data-testid="password-import-submit"]',
+      ),
+    );
+    await flushReact();
+
+    const importCall = tauri.invoke.mock.calls.find(
+      ([command]) => command === "import_secret_sources",
+    );
+    expect(importCall).toBeDefined();
+    expect(importCall?.[1]).toEqual({
+      spec: {
+        resource_template: null,
+        imports: [
+          {
+            resource: "",
+            display_name: "API_TOKEN",
+            description: null,
+            tags: [],
+            metadata: {},
+            source_locator: {
+              provider_kind: "dotenv_file",
+              file_path: "/tmp/app.env",
+              namespace: "prod",
+              prefix: "APP_",
+              key: "API_TOKEN",
+            },
+          },
+        ],
+      },
+    });
+
+    view.unmount();
+  });
+
+  it("imports multiple dotenv keys through the shared batch contract", async () => {
+    const dotenvInspection = {
+      file_path: "/tmp/app.env",
+      groups: [
+        {
+          id: "all",
+          label: "All keys",
+          namespace: null,
+          prefix: null,
+          key_count: 2,
+        },
+      ],
+      keys: [
+        {
+          group_id: "all",
+          label: "APP_ALPHA",
+          full_key: "APP_ALPHA",
+        },
+        {
+          group_id: "all",
+          label: "APP_BETA",
+          full_key: "APP_BETA",
+        },
+      ],
+    };
+
+    tauri.listen.mockImplementation(async () => tauri.unlisten);
+    tauri.invoke.mockImplementation(
+      async (command: string, payload?: unknown) => {
+        switch (command) {
+          case "dashboard":
+            return DASHBOARD;
+          case "desktop_settings":
+            return SETTINGS;
+          case "consume_handoff_request":
+            return null;
+          case "list_imported_secret_sources":
+            return EMPTY_IMPORTED_CATALOG;
+          case "list_onepassword_accounts_command":
+            return [];
+          case "pick_dotenv_file_command":
+            return "/tmp/app.env";
+          case "inspect_dotenv_file_command":
+            return dotenvInspection;
+          case "import_secret_sources": {
+            const spec = (
+              payload as {
+                spec: {
+                  resource_template: string | null;
+                  imports: Array<{
+                    resource: string;
+                    source_locator: { key: string };
+                  }>;
+                };
+              }
+            ).spec;
+            return {
+              catalog_path: "catalog/batch",
+              receipts: spec.imports.map((entry) => ({
+                catalog_path: `catalog/${entry.source_locator.key.toLowerCase()}`,
+                reference: {
+                  provider_kind: "dotenv_file",
+                  resource:
+                    entry.resource ||
+                    `secret/dotenv/${entry.source_locator.key.toLowerCase()}`,
+                  display_name: entry.source_locator.key,
+                  description: null,
+                  tags: [],
+                  imported_at: "2026-04-13T05:12:00.000Z",
+                  last_verified_at: null,
+                  file_path: "/tmp/app.env",
+                  namespace: null,
+                  prefix: null,
+                  key: entry.source_locator.key,
+                },
+              })),
+            };
+          }
+          default:
+            throw new Error(`Unexpected command: ${command}`);
+        }
+      },
+    );
+
+    const view = render();
+    await flushReact();
+
+    click(
+      view.container.querySelector<HTMLButtonElement>(
+        '[data-testid="view-tab-password-management"]',
+      ),
+    );
+    await flushReact();
+
+    click(
+      view.container.querySelector<HTMLButtonElement>(
+        '[data-testid="password-provider-option-dotenv_file"]',
+      ),
+    );
+    await clickAsync(
+      view.container.querySelector<HTMLButtonElement>(
+        '[data-testid="dotenv-choose-file-button"]',
+      ),
+    );
+    await flushReact();
+    await flushReact();
+
+    click(getPickerOption(view.container, "dotenv-group-picker", "all"));
+    await flushReact();
+
+    click(
+      getPickerOption(view.container, "dotenv-key-picker", "all:APP_ALPHA"),
+    );
+    click(getPickerOption(view.container, "dotenv-key-picker", "all:APP_BETA"));
+    await flushReact();
+
+    await clickAsync(
+      view.container.querySelector<HTMLButtonElement>(
+        '[data-testid="password-import-submit"]',
+      ),
+    );
+    await flushReact();
+
+    const importCalls = tauri.invoke.mock.calls.filter(
+      ([command]) => command === "import_secret_sources",
+    );
+    expect(importCalls).toHaveLength(1);
+    expect(importCalls[0]?.[1]).toEqual({
+      spec: {
+        resource_template: null,
+        imports: [
+          {
+            resource: "",
+            display_name: null,
+            description: null,
+            tags: [],
+            metadata: {},
+            source_locator: {
+              provider_kind: "dotenv_file",
+              file_path: "/tmp/app.env",
+              namespace: null,
+              prefix: null,
+              key: "APP_ALPHA",
+            },
+          },
+          {
+            resource: "",
+            display_name: null,
+            description: null,
+            tags: [],
+            metadata: {},
+            source_locator: {
+              provider_kind: "dotenv_file",
+              file_path: "/tmp/app.env",
+              namespace: null,
+              prefix: null,
+              key: "APP_BETA",
+            },
+          },
+        ],
+      },
+    });
+
+    expect(
+      view.container.querySelector(
+        '[data-testid="password-import-notice-message"]',
+      )?.textContent,
+    ).toBe("Imported 2 resources");
+    expect(
+      view.container.querySelectorAll(
+        '[data-testid="password-import-receipt-list"] li',
+      ),
+    ).toHaveLength(2);
+
+    view.unmount();
+  });
+
+  it("supports searching and updating imported secret metadata from the tree manager", async () => {
+    let catalog: ImportedSecretCatalog = {
+      catalog_path: "/tmp/plankton-secrets.toml",
+      imports: [
+        {
+          provider_kind: "dotenv_file" as const,
+          resource: "secret/env/api-token",
+          display_name: "API Token",
+          description: "Imported from dotenv",
+          tags: ["prod", "api"],
+          metadata: {
+            owner: "alice",
+            team: "backend",
+          },
+          imported_at: "2026-04-13T05:12:00.000Z",
+          last_verified_at: "2026-04-13T05:13:00.000Z",
+          file_path: "/tmp/app.env",
+          namespace: "prod",
+          prefix: "APP_",
+          key: "API_TOKEN",
+        },
+        {
+          provider_kind: "1password_cli" as const,
+          resource: "secret/op/github/password",
+          display_name: "Github Password",
+          description: null,
+          tags: ["shared"],
+          metadata: {
+            owner: "bob",
+          },
+          imported_at: "2026-04-13T06:12:00.000Z",
+          last_verified_at: null,
+          account: "demo@example.com",
+          account_id: "example.1password.com",
+          vault: "Private",
+          vault_id: "vault-1",
+          item: "Github",
+          item_id: "item-1",
+          field: "password",
+          field_id: "field-1",
+        },
+      ],
+    };
+
+    tauri.listen.mockImplementation(async () => tauri.unlisten);
+    tauri.invoke.mockImplementation(
+      async (command: string, payload?: unknown) => {
+        switch (command) {
+          case "dashboard":
+            return DASHBOARD;
+          case "desktop_settings":
+            return SETTINGS;
+          case "consume_handoff_request":
+            return null;
+          case "list_imported_secret_sources":
+            return catalog;
+          case "list_onepassword_accounts_command":
+            return [];
+          case "update_imported_secret_source": {
+            const update = (
+              payload as {
+                update: {
+                  resource: string;
+                  display_name: string | null;
+                  description: string | null;
+                  tags: string[];
+                  metadata: Record<string, string>;
+                };
+              }
+            ).update;
+            const nextReference = {
+              ...catalog.imports[0],
+              display_name:
+                update.display_name ?? catalog.imports[0].display_name,
+              description: update.description,
+              tags: update.tags,
+              metadata: update.metadata,
+            };
+            catalog = {
+              ...catalog,
+              imports: [nextReference, catalog.imports[1]],
+            };
+            return {
+              catalog_path: catalog.catalog_path,
+              reference: nextReference,
+            };
+          }
+          default:
+            throw new Error(`Unexpected command: ${command}`);
+        }
+      },
+    );
+
+    const view = render();
+    await flushReact();
+
+    click(
+      view.container.querySelector<HTMLButtonElement>(
+        '[data-testid="view-tab-password-management"]',
+      ),
+    );
+    await flushReact();
+    await flushReact();
+
+    expect(
+      view.container.querySelectorAll(
+        '[data-testid="imported-secret-tree-leaf"]',
+      ),
+    ).toHaveLength(2);
+
+    setFieldValue(
+      view.container.querySelector<HTMLInputElement>(
+        '[data-testid="imported-secret-search"]',
+      ),
+      "alice",
+    );
+    await flushReact();
+
+    const visibleLeaves = view.container.querySelectorAll(
+      '[data-testid="imported-secret-tree-leaf"]',
+    );
+    expect(visibleLeaves).toHaveLength(1);
+    expect(
+      view.container.querySelector<HTMLButtonElement>(
+        '[data-testid="imported-secret-tree-leaf"][data-resource="secret/env/api-token"]',
+      ),
+    ).not.toBeNull();
+
+    click(
+      view.container.querySelector<HTMLButtonElement>(
+        '[data-testid="imported-secret-tree-leaf"][data-resource="secret/env/api-token"]',
+      ),
+    );
+    await flushReact();
+
+    setFieldValue(
+      view.container.querySelector<HTMLTextAreaElement>(
+        '[data-testid="imported-secret-metadata"] textarea',
+      ),
+      "owner=bob\nteam=platform",
+    );
+    await flushReact();
+
+    await clickAsync(
+      view.container.querySelector<HTMLButtonElement>(
+        '[data-testid="imported-secret-save"]',
+      ),
+    );
+    await flushReact();
+    await flushReact();
+
+    const updateCall = tauri.invoke.mock.calls.find(
+      ([command]) => command === "update_imported_secret_source",
+    );
+    expect(updateCall).toBeDefined();
+    expect(updateCall?.[1]).toEqual({
+      update: {
+        resource: "secret/env/api-token",
+        display_name: "API Token",
+        description: "Imported from dotenv",
+        tags: ["prod", "api"],
+        metadata: {
+          owner: "bob",
+          team: "platform",
+        },
+      },
+    });
+    expect(
+      view.container.querySelector(
+        '[data-testid="imported-secret-catalog-notice"]',
+      )?.textContent,
+    ).toContain("secret/env/api-token");
+
+    view.unmount();
+  });
+
   it("submits 1Password imports with stable account and field identifiers", async () => {
     tauri.listen.mockImplementation(async () => tauri.unlisten);
     tauri.invoke.mockImplementation(async (command: string) => {
@@ -566,6 +1083,8 @@ describe("useDesktopApp runtime wiring", () => {
           return SETTINGS;
         case "consume_handoff_request":
           return null;
+        case "list_imported_secret_sources":
+          return EMPTY_IMPORTED_CATALOG;
         case "list_onepassword_accounts_command":
           return [
             {
@@ -604,26 +1123,31 @@ describe("useDesktopApp runtime wiring", () => {
               field_id: "field-2",
             },
           ];
-        case "import_secret_source":
+        case "import_secret_sources":
           return {
             catalog_path: "catalog/password/op/password",
-            reference: {
-              provider_kind: "1password_cli",
-              resource: "secret/op/password",
-              display_name: "Qq:Password",
-              description: null,
-              tags: ["prod"],
-              imported_at: "2026-04-13T05:12:00.000Z",
-              last_verified_at: null,
-              account: "demo@example.com",
-              account_id: "example.1password.com",
-              vault: "Private",
-              vault_id: "vault-1",
-              item: "Qq",
-              item_id: "item-1",
-              field: "password",
-              field_id: "field-1",
-            },
+            receipts: [
+              {
+                catalog_path: "catalog/password/op/password",
+                reference: {
+                  provider_kind: "1password_cli",
+                  resource: "secret/op/password",
+                  display_name: "Qq:Password",
+                  description: null,
+                  tags: ["prod"],
+                  imported_at: "2026-04-13T05:12:00.000Z",
+                  last_verified_at: null,
+                  account: "demo@example.com",
+                  account_id: "example.1password.com",
+                  vault: "Private",
+                  vault_id: "vault-1",
+                  item: "Qq",
+                  item_id: "item-1",
+                  field: "password",
+                  field_id: "field-1",
+                },
+              },
+            ],
           };
         default:
           throw new Error(`Unexpected command: ${command}`);
@@ -640,6 +1164,8 @@ describe("useDesktopApp runtime wiring", () => {
     );
     await flushReact();
     await flushReact();
+    await flushReact();
+    await flushReact();
 
     expect(
       getPickerOption(
@@ -648,39 +1174,34 @@ describe("useDesktopApp runtime wiring", () => {
         "example.1password.com",
       ),
     ).not.toBeNull();
-    click(
+    await clickAsync(
       getPickerOption(
         view.container,
         "onepassword-account-picker",
         "example.1password.com",
       ),
     );
-    await flushReact();
-    await flushReact();
 
     expect(
       getPickerOption(view.container, "onepassword-vault-picker", "vault-1"),
     ).not.toBeNull();
-    click(
+    await clickAsync(
       getPickerOption(view.container, "onepassword-vault-picker", "vault-1"),
     );
-    await flushReact();
-    await flushReact();
 
     expect(
       getPickerOption(view.container, "onepassword-item-picker", "item-1"),
     ).not.toBeNull();
-    click(getPickerOption(view.container, "onepassword-item-picker", "item-1"));
-    await flushReact();
-    await flushReact();
+    await clickAsync(
+      getPickerOption(view.container, "onepassword-item-picker", "item-1"),
+    );
 
     expect(
       getPickerOption(view.container, "onepassword-field-picker", "field-1"),
     ).not.toBeNull();
-    click(
+    await clickAsync(
       getPickerOption(view.container, "onepassword-field-picker", "field-1"),
     );
-    await flushReact();
 
     setFieldValue(
       view.container.querySelector<HTMLInputElement>(
@@ -704,26 +1225,32 @@ describe("useDesktopApp runtime wiring", () => {
     await flushReact();
 
     const importCall = tauri.invoke.mock.calls.find(
-      ([command]) => command === "import_secret_source",
+      ([command]) => command === "import_secret_sources",
     );
     expect(importCall).toBeDefined();
     expect(importCall?.[1]).toEqual({
       spec: {
-        resource: "secret/op/password",
-        display_name: "Qq",
-        description: null,
-        tags: ["prod"],
-        source_locator: {
-          provider_kind: "1password_cli",
-          account: "demo@example.com",
-          account_id: "example.1password.com",
-          vault: "Private",
-          vault_id: "vault-1",
-          item: "Qq",
-          item_id: "item-1",
-          field: "password",
-          field_id: "field-1",
-        },
+        resource_template: null,
+        imports: [
+          {
+            resource: "secret/op/password",
+            display_name: "Qq",
+            description: null,
+            tags: ["prod"],
+            metadata: {},
+            source_locator: {
+              provider_kind: "1password_cli",
+              account: "demo@example.com",
+              account_id: "example.1password.com",
+              vault: "Private",
+              vault_id: "vault-1",
+              item: "Qq",
+              item_id: "item-1",
+              field: "password",
+              field_id: "field-1",
+            },
+          },
+        ],
       },
     });
 
@@ -749,6 +1276,8 @@ describe("useDesktopApp runtime wiring", () => {
           return SETTINGS;
         case "consume_handoff_request":
           return null;
+        case "list_imported_secret_sources":
+          return EMPTY_IMPORTED_CATALOG;
         case "list_onepassword_accounts_command":
           return [
             { id: "example.1password.com", label: "demo@example.com" },
@@ -814,6 +1343,328 @@ describe("useDesktopApp runtime wiring", () => {
     view.unmount();
   });
 
+  it("builds 1Password preview targets after a single account is auto-selected", async () => {
+    tauri.listen.mockImplementation(async () => tauri.unlisten);
+    tauri.invoke.mockImplementation(async (command: string) => {
+      switch (command) {
+        case "dashboard":
+          return DASHBOARD;
+        case "desktop_settings":
+          return SETTINGS;
+        case "consume_handoff_request":
+          return null;
+        case "list_imported_secret_sources":
+          return EMPTY_IMPORTED_CATALOG;
+        case "list_onepassword_accounts_command":
+          return [
+            {
+              id: "example.1password.com",
+              label: "demo@example.com",
+              subtitle: "example.1password.com",
+            },
+          ];
+        case "list_onepassword_vaults_command":
+          return [
+            { id: "vault-1", label: "Private" },
+            { id: "vault-2", label: "Shared" },
+          ];
+        case "list_onepassword_items_command":
+          return [{ id: "item-1", label: "Qq" }];
+        case "list_onepassword_fields_command":
+          return [
+            {
+              selector: "Password",
+              label: "Password",
+              subtitle: "PASSWORD",
+              field_id: "password",
+            },
+          ];
+        default:
+          throw new Error(`Unexpected command: ${command}`);
+      }
+    });
+
+    const view = render();
+    await flushReact();
+
+    click(
+      view.container.querySelector<HTMLButtonElement>(
+        '[data-testid="view-tab-password-management"]',
+      ),
+    );
+    await flushReact();
+    await flushReact();
+    await flushReact();
+
+    expect(
+      getPickerOption(view.container, "onepassword-vault-picker", "vault-1"),
+    ).not.toBeNull();
+    click(
+      getPickerOption(view.container, "onepassword-vault-picker", "vault-1"),
+    );
+    await flushReact();
+    await flushReact();
+    await flushReact();
+
+    expect(
+      view.container.querySelector(
+        '[data-testid="password-template-preview-list"]',
+      ),
+    ).not.toBeNull();
+    expect(
+      view.container.querySelector(
+        '[data-testid="password-template-preview-list"] code',
+      )?.textContent,
+    ).toContain("secret/");
+    expect(
+      view.container.querySelector<HTMLButtonElement>(
+        '[data-testid="password-import-submit"]',
+      )?.disabled,
+    ).toBe(false);
+
+    view.unmount();
+  });
+
+  it("imports all fields and hides the field picker when multiple 1Password items are selected", async () => {
+    tauri.listen.mockImplementation(async () => tauri.unlisten);
+    tauri.invoke.mockImplementation(
+      async (
+        command: string,
+        payload?: { accountId?: string; vaultId?: string; itemId?: string },
+      ) => {
+        switch (command) {
+          case "dashboard":
+            return DASHBOARD;
+          case "desktop_settings":
+            return SETTINGS;
+          case "consume_handoff_request":
+            return null;
+          case "list_imported_secret_sources":
+            return EMPTY_IMPORTED_CATALOG;
+          case "list_onepassword_accounts_command":
+            return [{ id: "example.1password.com", label: "demo@example.com" }];
+          case "list_onepassword_vaults_command":
+            return [{ id: "vault-1", label: "Private" }];
+          case "list_onepassword_items_command":
+            return [
+              { id: "item-1", label: "Qq" },
+              { id: "item-2", label: "vm win11 pass" },
+            ];
+          case "list_onepassword_fields_command":
+            if (payload?.itemId === "item-1") {
+              return [
+                {
+                  selector: "password",
+                  label: "Password",
+                  subtitle: "PASSWORD",
+                  field_id: "field-1",
+                },
+                {
+                  selector: "notesPlain",
+                  label: "notesPlain",
+                  subtitle: "NOTES",
+                  field_id: "field-2",
+                },
+              ];
+            }
+            return [
+              {
+                selector: "password",
+                label: "password",
+                subtitle: "PASSWORD",
+                field_id: "field-3",
+              },
+            ];
+          default:
+            throw new Error(`Unexpected command: ${command}`);
+        }
+      },
+    );
+
+    const view = render();
+    await flushReact();
+
+    click(
+      view.container.querySelector<HTMLButtonElement>(
+        '[data-testid="view-tab-password-management"]',
+      ),
+    );
+    await flushReact();
+    await flushReact();
+    await flushReact();
+
+    click(getPickerOption(view.container, "onepassword-item-picker", "item-1"));
+    await flushReact();
+    click(getPickerOption(view.container, "onepassword-item-picker", "item-2"));
+    await flushReact();
+    await flushReact();
+    await flushReact();
+
+    expect(
+      view.container.querySelector(
+        '[data-testid="onepassword-item-picker"] .detail-section-header span',
+      )?.textContent,
+    ).toContain("2");
+    expect(
+      view.container.querySelector('[data-testid="onepassword-field-picker"]'),
+    ).toBeNull();
+    expect(
+      view.container.querySelector(
+        '[data-testid="onepassword-field-fallback"]',
+      ),
+    ).toBeNull();
+    expect(
+      view.container.querySelector<HTMLInputElement>(
+        '[data-testid="password-field-resource"] input',
+      )?.disabled,
+    ).toBe(true);
+    expect(
+      view.container.querySelectorAll(
+        '[data-testid="password-template-preview-list"] code',
+      ),
+    ).toHaveLength(3);
+    expect(
+      view.container.querySelector<HTMLButtonElement>(
+        '[data-testid="password-import-submit"]',
+      )?.disabled,
+    ).toBe(false);
+
+    const fieldCalls = tauri.invoke.mock.calls
+      .filter(([command]) => command === "list_onepassword_fields_command")
+      .map(([, payload]) => (payload as { itemId: string }).itemId);
+    expect(fieldCalls).toEqual(expect.arrayContaining(["item-1", "item-2"]));
+
+    view.unmount();
+  });
+
+  it("imports all fields and hides the field picker when multiple Bitwarden items are selected", async () => {
+    tauri.listen.mockImplementation(async () => tauri.unlisten);
+    tauri.invoke.mockImplementation(
+      async (
+        command: string,
+        payload?: { itemId?: string; containerId?: string | null },
+      ) => {
+        switch (command) {
+          case "dashboard":
+            return DASHBOARD;
+          case "desktop_settings":
+            return SETTINGS;
+          case "consume_handoff_request":
+            return null;
+          case "list_imported_secret_sources":
+            return EMPTY_IMPORTED_CATALOG;
+          case "list_onepassword_accounts_command":
+            return [];
+          case "list_bitwarden_accounts_command":
+            return [{ id: "bw-account", label: "user@example.com" }];
+          case "list_bitwarden_containers_command":
+            return [
+              {
+                id: "all",
+                kind: "all",
+                label: "All items",
+                subtitle: "Everything",
+                organization_id: null,
+                organization_label: null,
+              },
+            ];
+          case "list_bitwarden_items_command":
+            return [
+              { id: "bw-item-1", label: "Stripe Secret" },
+              { id: "bw-item-2", label: "Github Token" },
+            ];
+          case "list_bitwarden_fields_command":
+            if (payload?.itemId === "bw-item-1") {
+              return [
+                {
+                  selector: "login.password",
+                  label: "Password",
+                  subtitle: "Generated password",
+                  field_id: null,
+                },
+                {
+                  selector: "login.username",
+                  label: "Username",
+                  subtitle: "Login username",
+                  field_id: null,
+                },
+              ];
+            }
+            return [
+              {
+                selector: "login.password",
+                label: "Password",
+                subtitle: "Generated password",
+                field_id: null,
+              },
+            ];
+          default:
+            throw new Error(`Unexpected command: ${command}`);
+        }
+      },
+    );
+
+    const view = render();
+    await flushReact();
+
+    click(
+      view.container.querySelector<HTMLButtonElement>(
+        '[data-testid="view-tab-password-management"]',
+      ),
+    );
+    await flushReact();
+    click(
+      view.container.querySelector<HTMLButtonElement>(
+        '[data-testid="password-provider-option-bitwarden_cli"]',
+      ),
+    );
+    await flushReact();
+    await flushReact();
+    await flushReact();
+
+    click(
+      getPickerOption(view.container, "bitwarden-item-picker", "bw-item-1"),
+    );
+    await flushReact();
+    click(
+      getPickerOption(view.container, "bitwarden-item-picker", "bw-item-2"),
+    );
+    await flushReact();
+    await flushReact();
+    await flushReact();
+
+    expect(
+      view.container.querySelector('[data-testid="bitwarden-field-picker"]'),
+    ).toBeNull();
+    expect(
+      view.container.querySelector('[data-testid="bitwarden-field-fallback"]'),
+    ).toBeNull();
+    expect(
+      view.container.querySelector<HTMLInputElement>(
+        '[data-testid="password-field-resource"] input',
+      )?.disabled,
+    ).toBe(true);
+    expect(
+      view.container.querySelectorAll(
+        '[data-testid="password-template-preview-list"] code',
+      ),
+    ).toHaveLength(3);
+    expect(
+      view.container.querySelector<HTMLButtonElement>(
+        '[data-testid="password-import-submit"]',
+      )?.disabled,
+    ).toBe(false);
+
+    const fieldCalls = tauri.invoke.mock.calls
+      .filter(([command]) => command === "list_bitwarden_fields_command")
+      .map(([, payload]) => (payload as { itemId: string }).itemId);
+    expect(fieldCalls).toEqual(
+      expect.arrayContaining(["bw-item-1", "bw-item-2"]),
+    );
+
+    view.unmount();
+  });
+
   it("renders picker-first import controls for all password source types", async () => {
     tauri.listen.mockImplementation(async () => tauri.unlisten);
     tauri.invoke.mockImplementation(async (command: string) => {
@@ -824,6 +1675,8 @@ describe("useDesktopApp runtime wiring", () => {
           return SETTINGS;
         case "consume_handoff_request":
           return null;
+        case "list_imported_secret_sources":
+          return EMPTY_IMPORTED_CATALOG;
         case "list_onepassword_accounts_command":
           return [{ id: "personal.1password.com", label: "Personal" }];
         case "list_onepassword_vaults_command":
