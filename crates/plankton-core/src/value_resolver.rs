@@ -325,9 +325,30 @@ pub struct ImportedSecretCatalog {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+struct LocalSecretLiteralMetadataRecord {
+    pub resource: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tags: Vec<String>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub metadata: BTreeMap<String, String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct LocalSecretLiteralEntry {
     pub resource: String,
     pub value: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tags: Vec<String>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub metadata: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -351,6 +372,14 @@ pub struct ImportedSecretReferenceUpdate {
 pub struct LocalSecretLiteralUpsert {
     pub resource: String,
     pub value: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tags: Vec<String>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub metadata: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone)]
@@ -370,6 +399,8 @@ struct SecretCatalogFile {
     secrets: BTreeMap<String, String>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     values: BTreeMap<String, String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    literal_entries: Vec<LocalSecretLiteralMetadataRecord>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     imports: Vec<ImportedSecretReference>,
 }
@@ -633,11 +664,24 @@ pub fn list_imported_secret_references_at(
 
 pub fn list_local_secret_catalog_at(path: &Path) -> Result<LocalSecretCatalog, SecretImportError> {
     let mut catalog = load_secret_catalog_file_optional(path)?;
+    let literal_metadata = build_literal_metadata_map(&catalog.literal_entries);
     let mut literals = catalog
         .secrets
         .into_iter()
         .chain(catalog.values)
-        .map(|(resource, value)| LocalSecretLiteralEntry { resource, value })
+        .map(|(resource, value)| {
+            let metadata = literal_metadata.get(&resource);
+            LocalSecretLiteralEntry {
+                resource,
+                value,
+                display_name: metadata.and_then(|entry| entry.display_name.clone()),
+                description: metadata.and_then(|entry| entry.description.clone()),
+                tags: metadata.map(|entry| entry.tags.clone()).unwrap_or_default(),
+                metadata: metadata
+                    .map(|entry| entry.metadata.clone())
+                    .unwrap_or_default(),
+            }
+        })
         .collect::<Vec<_>>();
     literals.sort_by(|left, right| left.resource.cmp(&right.resource));
     catalog
@@ -660,23 +704,49 @@ pub fn upsert_local_secret_literal_at(
     path: &Path,
     entry: LocalSecretLiteralUpsert,
 ) -> Result<LocalSecretLiteralEntry, SecretImportError> {
-    let resource = entry.resource.trim();
+    let LocalSecretLiteralUpsert {
+        resource,
+        value,
+        display_name,
+        description,
+        tags,
+        metadata,
+    } = entry;
+    let resource = resource.trim();
     if resource.is_empty() {
         return Err(SecretImportError::MissingResource);
     }
-    if entry.value.is_empty() {
+    if value.is_empty() {
         return Err(SecretImportError::MissingSecretValue);
     }
+    let display_name = sanitize_optional_text(display_name);
+    let description = sanitize_optional_text(description);
+    let tags = sanitize_tags(tags);
+    let metadata = sanitize_metadata(metadata);
 
     let mut catalog = load_secret_catalog_file_optional(path)?;
     catalog.values.remove(resource);
-    catalog.secrets.insert(resource.to_string(), entry.value.clone());
+    catalog.secrets.insert(resource.to_string(), value.clone());
     catalog.imports.retain(|reference| reference.resource != resource);
+    upsert_literal_metadata_record(
+        &mut catalog.literal_entries,
+        LocalSecretLiteralMetadataRecord {
+            resource: resource.to_string(),
+            display_name: display_name.clone(),
+            description: description.clone(),
+            tags: tags.clone(),
+            metadata: metadata.clone(),
+        },
+    );
     save_secret_catalog_file(path, &catalog)?;
 
     Ok(LocalSecretLiteralEntry {
         resource: resource.to_string(),
-        value: entry.value,
+        value,
+        display_name,
+        description,
+        tags,
+        metadata,
     })
 }
 
@@ -753,12 +823,21 @@ pub fn delete_local_secret_entry_at(
         .filter(|reference| reference.resource != resource)
         .count();
     deleted |= next_len != catalog.imports.len();
+    let next_literal_entry_len = catalog
+        .literal_entries
+        .iter()
+        .filter(|entry| entry.resource != resource)
+        .count();
+    deleted |= next_literal_entry_len != catalog.literal_entries.len();
     if !deleted {
         return Ok(false);
     }
     catalog
         .imports
         .retain(|reference| reference.resource != resource);
+    catalog
+        .literal_entries
+        .retain(|entry| entry.resource != resource);
     save_secret_catalog_file(path, &catalog)?;
     Ok(true)
 }
@@ -813,6 +892,9 @@ fn import_secret_references_at_with_programs(
         let resource = reference.resource.as_str();
         catalog.secrets.remove(resource);
         catalog.values.remove(resource);
+        catalog
+            .literal_entries
+            .retain(|entry| entry.resource != resource);
         if let Some(existing) = catalog
             .imports
             .iter_mut()
@@ -979,6 +1061,14 @@ fn sanitize_tags(tags: Vec<String>) -> Vec<String> {
     sanitized
 }
 
+fn sanitize_optional_text(value: Option<String>) -> Option<String> {
+    value
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+}
+
 fn sanitize_metadata(metadata: BTreeMap<String, String>) -> BTreeMap<String, String> {
     metadata
         .into_iter()
@@ -992,6 +1082,44 @@ fn sanitize_metadata(metadata: BTreeMap<String, String>) -> BTreeMap<String, Str
             Some((sanitized_key.to_string(), sanitized_value.to_string()))
         })
         .collect()
+}
+
+fn build_literal_metadata_map(
+    entries: &[LocalSecretLiteralMetadataRecord],
+) -> BTreeMap<String, LocalSecretLiteralMetadataRecord> {
+    let mut map = BTreeMap::new();
+    for entry in entries {
+        let resource = entry.resource.trim();
+        if resource.is_empty() {
+            continue;
+        }
+
+        map.insert(
+            resource.to_string(),
+            LocalSecretLiteralMetadataRecord {
+                resource: resource.to_string(),
+                display_name: sanitize_optional_text(entry.display_name.clone()),
+                description: sanitize_optional_text(entry.description.clone()),
+                tags: sanitize_tags(entry.tags.clone()),
+                metadata: sanitize_metadata(entry.metadata.clone()),
+            },
+        );
+    }
+    map
+}
+
+fn upsert_literal_metadata_record(
+    entries: &mut Vec<LocalSecretLiteralMetadataRecord>,
+    entry: LocalSecretLiteralMetadataRecord,
+) {
+    if let Some(existing) = entries
+        .iter_mut()
+        .find(|existing| existing.resource == entry.resource)
+    {
+        *existing = entry;
+    } else {
+        entries.push(entry);
+    }
 }
 
 fn bootstrap_secret_catalog(path: &Path) -> Result<bool, ValueResolverError> {
@@ -1091,6 +1219,15 @@ fn parse_secret_catalog(
     merge_string_table(&mut catalog.secrets, table.get("secrets"));
     merge_string_table(&mut catalog.secrets, table.get("values"));
 
+    if let Some(literal_entries_value) = table.get("literal_entries") {
+        catalog.literal_entries = literal_entries_value.clone().try_into().map_err(|error| {
+            ValueResolverError::ParseCatalog {
+                path: display_path.clone(),
+                message: error.to_string(),
+            }
+        })?;
+    }
+
     if let Some(imports_value) = table.get("imports") {
         catalog.imports =
             imports_value
@@ -1103,7 +1240,7 @@ fn parse_secret_catalog(
     }
 
     for (key, value) in &table {
-        if matches!(key.as_str(), "secrets" | "values" | "imports") {
+        if matches!(key.as_str(), "secrets" | "values" | "literal_entries" | "imports") {
             continue;
         }
         if let Some(value) = value.as_str() {
@@ -1656,11 +1793,12 @@ mod tests {
     use super::{
         default_value_resolver, delete_imported_secret_reference_at,
         import_secret_reference_at_with_programs, import_secret_references_at_with_programs,
-        list_imported_secret_references_at, update_imported_secret_reference_at,
-        ImportedSecretReferenceUpdate, LocalSecretCatalogResolver, SecretImportBatchSpec,
-        SecretImportSpec, SecretSourceLocator, ValueResolver, ValueResolverError,
-        VendorCliPrograms, BITWARDEN_CLI_PROVIDER_KIND, DOTENV_FILE_PROVIDER_KIND,
-        ONEPASSWORD_CLI_PROVIDER_KIND,
+        list_imported_secret_references_at, list_local_secret_catalog_at,
+        update_imported_secret_reference_at, upsert_local_secret_literal_at,
+        ImportedSecretReferenceUpdate, LocalSecretCatalogResolver,
+        LocalSecretLiteralUpsert, SecretImportBatchSpec, SecretImportSpec,
+        SecretSourceLocator, ValueResolver, ValueResolverError, VendorCliPrograms,
+        BITWARDEN_CLI_PROVIDER_KIND, DOTENV_FILE_PROVIDER_KIND, ONEPASSWORD_CLI_PROVIDER_KIND,
     };
 
     #[test]
@@ -1965,6 +2103,50 @@ mod tests {
                 .expect("imported value should resolve"),
             "service-value"
         );
+    }
+
+    #[test]
+    fn local_literal_catalog_preserves_display_metadata() {
+        let temp = tempdir().expect("temp directory should be created");
+        let catalog_path = temp.path().join("catalog.toml");
+
+        let entry = upsert_local_secret_literal_at(
+            catalog_path.as_path(),
+            LocalSecretLiteralUpsert {
+                resource: "secret/manual/demo".to_string(),
+                value: "demo-value".to_string(),
+                display_name: Some("Manual Demo".to_string()),
+                description: Some("local note".to_string()),
+                tags: vec!["prod".to_string(), "db".to_string()],
+                metadata: BTreeMap::from([
+                    ("owner".to_string(), "alice".to_string()),
+                    ("team".to_string(), "platform".to_string()),
+                ]),
+            },
+        )
+        .expect("local literal should save");
+
+        assert_eq!(entry.display_name.as_deref(), Some("Manual Demo"));
+        assert_eq!(entry.description.as_deref(), Some("local note"));
+        assert_eq!(entry.tags, vec!["prod".to_string(), "db".to_string()]);
+        assert_eq!(entry.metadata.get("owner").map(String::as_str), Some("alice"));
+
+        let listed = list_local_secret_catalog_at(catalog_path.as_path())
+            .expect("catalog should list local literals");
+        assert_eq!(listed.literals.len(), 1);
+        assert_eq!(listed.literals[0].resource, "secret/manual/demo");
+        assert_eq!(listed.literals[0].display_name.as_deref(), Some("Manual Demo"));
+        assert_eq!(listed.literals[0].description.as_deref(), Some("local note"));
+        assert_eq!(
+            listed.literals[0].metadata.get("team").map(String::as_str),
+            Some("platform")
+        );
+
+        let catalog_content =
+            fs::read_to_string(catalog_path.as_path()).expect("catalog should be readable");
+        assert!(catalog_content.contains("[[literal_entries]]"));
+        assert!(catalog_content.contains("display_name = \"Manual Demo\""));
+        assert!(!catalog_content.contains("owner = \"\""));
     }
 
     #[test]

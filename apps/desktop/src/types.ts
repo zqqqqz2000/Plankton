@@ -224,6 +224,10 @@ export type ImportedSecretCatalog = {
 export type LocalSecretLiteralEntry = {
   resource: string;
   value: string;
+  display_name?: string | null;
+  description?: string | null;
+  tags?: string[];
+  metadata?: Record<string, string>;
 };
 
 export type LocalSecretCatalog = {
@@ -243,6 +247,10 @@ export type ImportedSecretReferenceUpdate = {
 export type LocalSecretLiteralUpsert = {
   resource: string;
   value: string;
+  display_name?: string | null;
+  description?: string | null;
+  tags?: string[];
+  metadata?: Record<string, string>;
 };
 
 export type ImportPickerOption = {

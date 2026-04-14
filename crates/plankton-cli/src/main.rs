@@ -17,8 +17,9 @@ use plankton_core::{
     import_secret_reference, list_local_secret_catalog, load_settings, prompt_call_chain_paths,
     AccessRequest, ApprovalStatus, AuditAction, AuditRecord, AutomaticDecisionSource,
     AutomaticDecisionTrace, AutomaticDisposition, Decision, LlmSuggestion, LlmSuggestionUsage,
-    PlanktonSettings, PolicyMode, ProviderTrace, RequestContext, SecretImportSpec,
-    SecretSourceLocator, SuggestedDecision, ValueResolver, ValueResolverError,
+    LocalSecretCatalog, LocalSecretLiteralEntry, PlanktonSettings, PolicyMode, ProviderTrace,
+    RequestContext, SecretImportSpec, SecretSourceLocator, SuggestedDecision, ValueResolver,
+    ValueResolverError,
 };
 use plankton_store::{RequestQueryResult, SqliteStore};
 use serde::Serialize;
@@ -41,10 +42,9 @@ struct Cli {
         long,
         global = true,
         value_enum,
-        default_value_t = OutputFormat::Text,
-        help = "Choose human-readable text or JSON output"
+        help = "Choose text, JSON, or JSON Lines output"
     )]
-    output: OutputFormat,
+    output: Option<OutputFormat>,
     #[command(subcommand)]
     command: Commands,
 }
@@ -53,6 +53,7 @@ struct Cli {
 enum OutputFormat {
     Text,
     Json,
+    Jsonl,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
@@ -82,10 +83,10 @@ enum Commands {
     )]
     Get(GetArgs),
     #[command(
-        about = "List resource identifiers currently available from the active resource catalog without revealing secret values"
+        about = "List local secret catalog entries with metadata and source annotations without revealing secret values"
     )]
     List(ListArgs),
-    #[command(about = "Fuzzy-search the same resource directory used by `list` and `get`")]
+    #[command(about = "Fuzzy-search the same catalog fields used by `list` and `get`")]
     Search(SearchArgs),
     #[command(
         name = "import",
@@ -396,8 +397,25 @@ struct GetOutputEnvelope {
 }
 
 #[derive(Debug, Clone, Serialize)]
-struct ResourceDirectoryOutputView {
-    resources: Vec<String>,
+#[serde(rename_all = "snake_case")]
+enum ResourceDirectoryEntryKind {
+    Literal,
+    Imported,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct ResourceDirectoryEntryView {
+    resource: String,
+    entry_kind: ResourceDirectoryEntryKind,
+    display_name: Option<String>,
+    description: Option<String>,
+    tags: Vec<String>,
+    metadata: BTreeMap<String, String>,
+    provider_kind: Option<String>,
+    container_label: Option<String>,
+    field_selector: Option<String>,
+    imported_at: Option<chrono::DateTime<chrono::Utc>>,
+    last_verified_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -499,6 +517,7 @@ async fn run() -> Result<ExitCode> {
 
     match command {
         Commands::Get(args) => {
+            let output = resolve_output(output, OutputFormat::Text);
             let settings = load_settings().context("failed to load Plankton settings")?;
             let store = SqliteStore::new(&settings)
                 .await
@@ -544,21 +563,26 @@ async fn run() -> Result<ExitCode> {
             return handle_get_result(output, &result);
         }
         Commands::List(_) => {
-            let resources = load_active_resource_directory()?;
-            let directory_output = build_resource_directory_output(&resources);
-            print_output(output, &directory_output, || {
-                render_resource_directory_text(&resources)
-            })?;
+            let output = resolve_output(output, OutputFormat::Jsonl);
+            let entries = load_active_resource_directory()?;
+            match output {
+                OutputFormat::Text => println!("{}", render_resource_directory_text(&entries)),
+                OutputFormat::Json => print_json_output(&entries)?,
+                OutputFormat::Jsonl => print_jsonl_output(&entries)?,
+            }
         }
         Commands::Search(args) => {
-            let resources = load_active_resource_directory()?;
-            let filtered = filter_resource_directory(&resources, &args.query);
-            let directory_output = build_resource_directory_output(&filtered);
-            print_output(output, &directory_output, || {
-                render_resource_directory_text(&filtered)
-            })?;
+            let output = resolve_output(output, OutputFormat::Jsonl);
+            let entries = load_active_resource_directory()?;
+            let filtered = filter_resource_directory(&entries, &args.query);
+            match output {
+                OutputFormat::Text => println!("{}", render_resource_directory_text(&filtered)),
+                OutputFormat::Json => print_json_output(&filtered)?,
+                OutputFormat::Jsonl => print_jsonl_output(&filtered)?,
+            }
         }
         Commands::Import(args) => {
+            let output = resolve_output(output, OutputFormat::Text);
             let spec = build_import_spec(args);
             let receipt = import_secret_reference(spec).context(
                 "failed to import password manager source into the local secret catalog",
@@ -600,12 +624,19 @@ fn load_request_resource_annotations(
 ) -> Result<(Vec<String>, BTreeMap<String, String>)> {
     let catalog = list_local_secret_catalog()
         .context("failed to inspect the local secret catalog for resource metadata")?;
-    let entry = catalog
+    let literal_entry = catalog
+        .literals
+        .into_iter()
+        .find(|literal| literal.resource == resource);
+    if let Some(literal) = literal_entry {
+        return Ok((literal.tags, literal.metadata));
+    }
+    let imported_entry = catalog
         .imports
         .into_iter()
         .find(|reference| reference.resource == resource);
 
-    Ok(match entry {
+    Ok(match imported_entry {
         Some(reference) => (reference.tags, reference.metadata),
         None => (Vec::new(), BTreeMap::new()),
     })
@@ -626,6 +657,13 @@ fn resolve_requested_policy_mode(
         .unwrap_or(settings.default_policy_mode)
 }
 
+fn resolve_output(
+    override_output: Option<OutputFormat>,
+    default_output: OutputFormat,
+) -> OutputFormat {
+    override_output.unwrap_or(default_output)
+}
+
 fn print_output<T>(
     output: OutputFormat,
     value: &T,
@@ -639,6 +677,10 @@ where
         OutputFormat::Json => println!(
             "{}",
             serde_json::to_string_pretty(value).context("failed to serialize CLI output")?
+        ),
+        OutputFormat::Jsonl => println!(
+            "{}",
+            serde_json::to_string(value).context("failed to serialize CLI output")?
         ),
     }
 
@@ -656,10 +698,165 @@ where
     Ok(())
 }
 
-fn load_active_resource_directory() -> Result<Vec<String>> {
-    let resolver =
-        default_value_resolver().context("failed to load the active resource directory")?;
-    Ok(resolver.list_resources())
+fn print_jsonl_output<T>(values: &[T]) -> Result<()>
+where
+    T: Serialize,
+{
+    for value in values {
+        println!(
+            "{}",
+            serde_json::to_string(value).context("failed to serialize CLI output")?
+        );
+    }
+    Ok(())
+}
+
+fn build_resource_directory_entries(
+    catalog: LocalSecretCatalog,
+) -> Vec<ResourceDirectoryEntryView> {
+    let mut entries = catalog
+        .literals
+        .into_iter()
+        .map(build_literal_resource_directory_entry)
+        .chain(
+            catalog
+                .imports
+                .into_iter()
+                .map(build_imported_resource_directory_entry),
+        )
+        .collect::<Vec<_>>();
+    entries.sort_by(|left, right| left.resource.cmp(&right.resource));
+    entries
+}
+
+fn build_literal_resource_directory_entry(
+    literal: LocalSecretLiteralEntry,
+) -> ResourceDirectoryEntryView {
+    ResourceDirectoryEntryView {
+        resource: literal.resource,
+        entry_kind: ResourceDirectoryEntryKind::Literal,
+        display_name: literal.display_name,
+        description: literal.description,
+        tags: literal.tags,
+        metadata: literal.metadata,
+        provider_kind: None,
+        container_label: None,
+        field_selector: None,
+        imported_at: None,
+        last_verified_at: None,
+    }
+}
+
+fn build_imported_resource_directory_entry(
+    reference: plankton_core::ImportedSecretReference,
+) -> ResourceDirectoryEntryView {
+    let provider_kind = reference.provider_kind().to_string();
+    let container_label = reference
+        .source_locator
+        .container_label()
+        .map(ToOwned::to_owned);
+    let field_selector = reference.source_locator.field_selector().to_string();
+
+    ResourceDirectoryEntryView {
+        resource: reference.resource,
+        entry_kind: ResourceDirectoryEntryKind::Imported,
+        display_name: Some(reference.display_name),
+        description: reference.description,
+        tags: reference.tags,
+        metadata: reference.metadata,
+        provider_kind: Some(provider_kind),
+        container_label,
+        field_selector: Some(field_selector),
+        imported_at: Some(reference.imported_at),
+        last_verified_at: reference.last_verified_at,
+    }
+}
+
+fn load_active_resource_directory() -> Result<Vec<ResourceDirectoryEntryView>> {
+    let catalog = list_local_secret_catalog()
+        .context("failed to load the active resource directory from the local secret catalog")?;
+    Ok(build_resource_directory_entries(catalog))
+}
+
+fn render_resource_directory_text(entries: &[ResourceDirectoryEntryView]) -> String {
+    entries
+        .iter()
+        .map(|entry| {
+            let mut lines = vec![entry.resource.clone()];
+            if let Some(display_name) = &entry.display_name {
+                lines.push(format!("  display_name: {display_name}"));
+            }
+            if let Some(description) = &entry.description {
+                lines.push(format!("  description: {description}"));
+            }
+            if !entry.tags.is_empty() {
+                lines.push(format!("  tags: {}", entry.tags.join(", ")));
+            }
+            if !entry.metadata.is_empty() {
+                lines.push(format!(
+                    "  metadata: {}",
+                    entry
+                        .metadata
+                        .iter()
+                        .map(|(key, value)| format!("{key}={value}"))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ));
+            }
+            if let Some(provider_kind) = &entry.provider_kind {
+                lines.push(format!("  provider_kind: {provider_kind}"));
+            }
+            if let Some(container_label) = &entry.container_label {
+                lines.push(format!("  container: {container_label}"));
+            }
+            if let Some(field_selector) = &entry.field_selector {
+                lines.push(format!("  field: {field_selector}"));
+            }
+            lines.join("\n")
+        })
+        .collect::<Vec<_>>()
+        .join("\n\n")
+}
+
+fn resource_directory_search_text(entry: &ResourceDirectoryEntryView) -> String {
+    let mut parts = vec![
+        entry.resource.clone(),
+        entry.display_name.clone().unwrap_or_default(),
+        entry.description.clone().unwrap_or_default(),
+    ];
+    parts.extend(entry.tags.iter().cloned());
+    parts.extend(
+        entry
+            .metadata
+            .iter()
+            .flat_map(|(key, value)| [key.clone(), value.clone(), format!("{key}={value}")]),
+    );
+    if let Some(provider_kind) = &entry.provider_kind {
+        parts.push(provider_kind.clone());
+    }
+    if let Some(container_label) = &entry.container_label {
+        parts.push(container_label.clone());
+    }
+    if let Some(field_selector) = &entry.field_selector {
+        parts.push(field_selector.clone());
+    }
+    parts.join("\n").to_ascii_lowercase()
+}
+
+fn filter_resource_directory(
+    entries: &[ResourceDirectoryEntryView],
+    query: &str,
+) -> Vec<ResourceDirectoryEntryView> {
+    let normalized_query = query.trim().to_ascii_lowercase();
+    if normalized_query.is_empty() {
+        return entries.to_vec();
+    }
+
+    entries
+        .iter()
+        .filter(|entry| resource_directory_search_text(entry).contains(&normalized_query))
+        .cloned()
+        .collect()
 }
 
 fn build_import_spec(args: ImportArgs) -> SecretImportSpec {
@@ -757,6 +954,18 @@ fn handle_get_result(output: OutputFormat, result: &RequestQueryResult) -> Resul
                         ))?;
                         Ok(ExitCode::SUCCESS)
                     }
+                    OutputFormat::Jsonl => {
+                        println!(
+                            "{}",
+                            serde_json::to_string(&build_get_success_output(
+                                &result.request,
+                                value,
+                                resolver.kind(),
+                            ))
+                            .context("failed to serialize CLI output")?
+                        );
+                        Ok(ExitCode::SUCCESS)
+                    }
                 },
                 Err(error) => handle_get_failure(
                     output,
@@ -797,6 +1006,14 @@ fn handle_get_failure(
         OutputFormat::Text => bail!(error),
         OutputFormat::Json => {
             print_json_output(&build_get_error_output(request, decision, error))?;
+            Ok(ExitCode::FAILURE)
+        }
+        OutputFormat::Jsonl => {
+            println!(
+                "{}",
+                serde_json::to_string(&build_get_error_output(request, decision, error))
+                    .context("failed to serialize CLI output")?
+            );
             Ok(ExitCode::FAILURE)
         }
     }
@@ -901,15 +1118,6 @@ fn build_get_error_output(
         resolver_kind: None,
         error: Some(error),
     }
-}
-
-fn filter_resource_directory(resources: &[String], query: &str) -> Vec<String> {
-    let query = query.trim().to_ascii_lowercase();
-    resources
-        .iter()
-        .filter(|resource| resource.to_ascii_lowercase().contains(&query))
-        .cloned()
-        .collect()
 }
 
 fn build_suggestion_report(request: &AccessRequest) -> SuggestionReport {
@@ -1113,12 +1321,6 @@ fn build_status_output(result: &RequestQueryResult) -> StatusOutputView {
     }
 }
 
-fn build_resource_directory_output(resources: &[String]) -> ResourceDirectoryOutputView {
-    ResourceDirectoryOutputView {
-        resources: resources.to_vec(),
-    }
-}
-
 fn build_import_receipt_output(
     receipt: &plankton_core::ImportedSecretReceipt,
 ) -> ImportReceiptOutputView {
@@ -1319,10 +1521,6 @@ fn render_status_text(result: &RequestQueryResult) -> String {
     ];
 
     lines.join("\n")
-}
-
-fn render_resource_directory_text(resources: &[String]) -> String {
-    resources.join("\n")
 }
 
 fn render_import_receipt_text(output: &ImportReceiptOutputView) -> String {
@@ -2617,7 +2815,8 @@ mod tests {
             .render_long_help()
             .to_string();
 
-        assert!(list_help.contains("resource identifiers"));
+        assert!(list_help.contains("local secret catalog entries"));
+        assert!(list_help.contains("metadata and source annotations"));
         assert!(list_help.contains("without revealing secret values"));
     }
 
@@ -3157,30 +3356,66 @@ mod tests {
     }
 
     #[test]
-    fn renders_accessible_resource_list_as_identifiers_only() {
-        let resources = vec!["secret/dev-token".to_string()];
+    fn renders_accessible_resource_list_with_metadata() {
+        let resources = vec![ResourceDirectoryEntryView {
+            resource: "secret/dev-token".to_string(),
+            entry_kind: ResourceDirectoryEntryKind::Imported,
+            display_name: Some("Dev Token".to_string()),
+            description: Some("temporary token".to_string()),
+            tags: vec!["dev".to_string(), "api".to_string()],
+            metadata: BTreeMap::from([("owner".to_string(), "alice".to_string())]),
+            provider_kind: Some("dotenv_file".to_string()),
+            container_label: Some("dev".to_string()),
+            field_selector: Some("API_TOKEN".to_string()),
+            imported_at: None,
+            last_verified_at: None,
+        }];
 
         let rendered = render_resource_directory_text(&resources);
-        let output = build_resource_directory_output(&resources);
 
-        assert_eq!(rendered, "secret/dev-token");
-        assert!(!rendered.contains("granted_by_request_id"));
-        assert!(!rendered.contains("policy_mode"));
-        assert!(!rendered.contains("secret_value"));
-        assert_eq!(output.resources, vec!["secret/dev-token".to_string()]);
+        assert!(rendered.contains("secret/dev-token"));
+        assert!(rendered.contains("display_name: Dev Token"));
+        assert!(rendered.contains("description: temporary token"));
+        assert!(rendered.contains("tags: dev, api"));
+        assert!(rendered.contains("metadata: owner=alice"));
+        assert!(rendered.contains("provider_kind: dotenv_file"));
     }
 
     #[test]
-    fn filters_accessible_resources_by_case_insensitive_resource_substring() {
+    fn filters_accessible_resources_by_case_insensitive_directory_fields() {
         let resources = vec![
-            "secret/dev-token".to_string(),
-            "config/prod-readonly".to_string(),
+            ResourceDirectoryEntryView {
+                resource: "secret/dev-token".to_string(),
+                entry_kind: ResourceDirectoryEntryKind::Imported,
+                display_name: Some("Dev Token".to_string()),
+                description: Some("temporary token".to_string()),
+                tags: vec!["dev".to_string()],
+                metadata: BTreeMap::new(),
+                provider_kind: Some("dotenv_file".to_string()),
+                container_label: Some("dev".to_string()),
+                field_selector: Some("API_TOKEN".to_string()),
+                imported_at: None,
+                last_verified_at: None,
+            },
+            ResourceDirectoryEntryView {
+                resource: "config/prod-readonly".to_string(),
+                entry_kind: ResourceDirectoryEntryKind::Literal,
+                display_name: Some("Readonly".to_string()),
+                description: None,
+                tags: vec!["prod".to_string()],
+                metadata: BTreeMap::from([("team".to_string(), "platform".to_string())]),
+                provider_kind: None,
+                container_label: None,
+                field_selector: None,
+                imported_at: None,
+                last_verified_at: None,
+            },
         ];
 
-        let filtered = filter_resource_directory(&resources, "DEV");
+        let filtered = filter_resource_directory(&resources, "platform");
 
         assert_eq!(filtered.len(), 1);
-        assert_eq!(filtered[0], "secret/dev-token");
+        assert_eq!(filtered[0].resource, "config/prod-readonly");
     }
 
     #[test]

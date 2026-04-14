@@ -210,7 +210,7 @@ describe("dashboardModel", () => {
     ]);
   });
 
-  it("orders resolved auto decisions from oldest to newest", () => {
+  it("orders resolved auto decisions from newest to oldest", () => {
     const entries = getResolvedAutoDecisionEntries([
       {
         id: "audit-10",
@@ -273,8 +273,8 @@ describe("dashboardModel", () => {
     ]);
 
     expect(entries.map((entry) => entry.request_id)).toEqual([
-      "request-10",
       "request-11",
+      "request-10",
     ]);
   });
 
@@ -376,7 +376,7 @@ describe("dashboardModel", () => {
     ]);
   });
 
-  it("orders resolved review requests from oldest to newest", () => {
+  it("orders resolved review requests from newest to oldest", () => {
     const entries = getResolvedReviewRequestEntries([
       {
         id: "audit-20",
@@ -429,8 +429,8 @@ describe("dashboardModel", () => {
     ]);
 
     expect(entries.map((entry) => entry.request_id)).toEqual([
-      "request-20",
       "request-21",
+      "request-20",
     ]);
   });
 

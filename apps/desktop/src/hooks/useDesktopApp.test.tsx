@@ -22,7 +22,7 @@ import App from "../App";
 import type {
   DashboardData,
   DesktopSettings,
-  ImportedSecretCatalog,
+  LocalSecretCatalog,
 } from "../types";
 
 Object.assign(globalThis, {
@@ -53,8 +53,9 @@ const SETTINGS: DesktopSettings = {
   acp_timeout_secs: 20,
 };
 
-const EMPTY_IMPORTED_CATALOG = {
+const EMPTY_LOCAL_SECRET_CATALOG = {
   catalog_path: "/tmp/plankton-secrets.toml",
+  literals: [],
   imports: [],
 };
 
@@ -295,8 +296,8 @@ describe("useDesktopApp runtime wiring", () => {
           return SETTINGS;
         case "consume_handoff_request":
           return null;
-        case "list_imported_secret_sources":
-          return EMPTY_IMPORTED_CATALOG;
+        case "list_local_secret_catalog_command":
+          return EMPTY_LOCAL_SECRET_CATALOG;
         case "save_desktop_settings":
           return SETTINGS;
         default:
@@ -412,8 +413,8 @@ describe("useDesktopApp runtime wiring", () => {
           return SETTINGS;
         case "consume_handoff_request":
           return null;
-        case "list_imported_secret_sources":
-          return EMPTY_IMPORTED_CATALOG;
+        case "list_local_secret_catalog_command":
+          return EMPTY_LOCAL_SECRET_CATALOG;
         case "list_onepassword_accounts_command":
           return [];
         case "pick_dotenv_file_command":
@@ -614,8 +615,8 @@ describe("useDesktopApp runtime wiring", () => {
           return SETTINGS;
         case "consume_handoff_request":
           return null;
-        case "list_imported_secret_sources":
-          return EMPTY_IMPORTED_CATALOG;
+        case "list_local_secret_catalog_command":
+          return EMPTY_LOCAL_SECRET_CATALOG;
         case "list_onepassword_accounts_command":
           return [];
         case "pick_dotenv_file_command":
@@ -756,8 +757,8 @@ describe("useDesktopApp runtime wiring", () => {
             return SETTINGS;
           case "consume_handoff_request":
             return null;
-          case "list_imported_secret_sources":
-            return EMPTY_IMPORTED_CATALOG;
+          case "list_local_secret_catalog_command":
+            return EMPTY_LOCAL_SECRET_CATALOG;
           case "list_onepassword_accounts_command":
             return [];
           case "pick_dotenv_file_command":
@@ -898,8 +899,9 @@ describe("useDesktopApp runtime wiring", () => {
   });
 
   it("supports searching and updating imported secret metadata from the tree manager", async () => {
-    let catalog: ImportedSecretCatalog = {
+    let catalog: LocalSecretCatalog = {
       catalog_path: "/tmp/plankton-secrets.toml",
+      literals: [],
       imports: [
         {
           provider_kind: "dotenv_file" as const,
@@ -951,7 +953,7 @@ describe("useDesktopApp runtime wiring", () => {
             return SETTINGS;
           case "consume_handoff_request":
             return null;
-          case "list_imported_secret_sources":
+          case "list_local_secret_catalog_command":
             return catalog;
           case "list_onepassword_accounts_command":
             return [];
@@ -1083,8 +1085,8 @@ describe("useDesktopApp runtime wiring", () => {
           return SETTINGS;
         case "consume_handoff_request":
           return null;
-        case "list_imported_secret_sources":
-          return EMPTY_IMPORTED_CATALOG;
+        case "list_local_secret_catalog_command":
+          return EMPTY_LOCAL_SECRET_CATALOG;
         case "list_onepassword_accounts_command":
           return [
             {
@@ -1276,8 +1278,8 @@ describe("useDesktopApp runtime wiring", () => {
           return SETTINGS;
         case "consume_handoff_request":
           return null;
-        case "list_imported_secret_sources":
-          return EMPTY_IMPORTED_CATALOG;
+        case "list_local_secret_catalog_command":
+          return EMPTY_LOCAL_SECRET_CATALOG;
         case "list_onepassword_accounts_command":
           return [
             { id: "example.1password.com", label: "demo@example.com" },
@@ -1353,8 +1355,8 @@ describe("useDesktopApp runtime wiring", () => {
           return SETTINGS;
         case "consume_handoff_request":
           return null;
-        case "list_imported_secret_sources":
-          return EMPTY_IMPORTED_CATALOG;
+        case "list_local_secret_catalog_command":
+          return EMPTY_LOCAL_SECRET_CATALOG;
         case "list_onepassword_accounts_command":
           return [
             {
@@ -1439,8 +1441,8 @@ describe("useDesktopApp runtime wiring", () => {
             return SETTINGS;
           case "consume_handoff_request":
             return null;
-          case "list_imported_secret_sources":
-            return EMPTY_IMPORTED_CATALOG;
+          case "list_local_secret_catalog_command":
+            return EMPTY_LOCAL_SECRET_CATALOG;
           case "list_onepassword_accounts_command":
             return [{ id: "example.1password.com", label: "demo@example.com" }];
           case "list_onepassword_vaults_command":
@@ -1551,8 +1553,8 @@ describe("useDesktopApp runtime wiring", () => {
             return SETTINGS;
           case "consume_handoff_request":
             return null;
-          case "list_imported_secret_sources":
-            return EMPTY_IMPORTED_CATALOG;
+          case "list_local_secret_catalog_command":
+            return EMPTY_LOCAL_SECRET_CATALOG;
           case "list_onepassword_accounts_command":
             return [];
           case "list_bitwarden_accounts_command":
@@ -1675,8 +1677,8 @@ describe("useDesktopApp runtime wiring", () => {
           return SETTINGS;
         case "consume_handoff_request":
           return null;
-        case "list_imported_secret_sources":
-          return EMPTY_IMPORTED_CATALOG;
+        case "list_local_secret_catalog_command":
+          return EMPTY_LOCAL_SECRET_CATALOG;
         case "list_onepassword_accounts_command":
           return [{ id: "personal.1password.com", label: "Personal" }];
         case "list_onepassword_vaults_command":
@@ -1834,6 +1836,212 @@ describe("useDesktopApp runtime wiring", () => {
     expect(
       view.container.querySelector('[data-testid="dotenv-key-picker-search"]'),
     ).not.toBeNull();
+
+    view.unmount();
+  });
+
+  it("switches back to approvals and focuses the latest request when a handoff arrives", async () => {
+    let handoffListener:
+      | ((event: { payload: { request_id: string } }) => void)
+      | null = null;
+
+    tauri.listen.mockImplementation(async (_event: string, handler) => {
+      handoffListener = handler as (event: {
+        payload: { request_id: string };
+      }) => void;
+      return tauri.unlisten;
+    });
+    tauri.invoke.mockImplementation(async (command: string) => {
+      switch (command) {
+        case "dashboard":
+          return DASHBOARD;
+        case "desktop_settings":
+          return SETTINGS;
+        case "consume_handoff_request":
+          return null;
+        case "list_local_secret_catalog_command":
+          return EMPTY_LOCAL_SECRET_CATALOG;
+        case "list_onepassword_accounts_command":
+          return [];
+        default:
+          throw new Error(`Unexpected command: ${command}`);
+      }
+    });
+
+    const view = render();
+    await flushReact();
+
+    click(
+      view.container.querySelector<HTMLButtonElement>(
+        '[data-testid="view-tab-password-management"]',
+      ),
+    );
+    await flushReact();
+
+    await act(async () => {
+      handoffListener?.({ payload: { request_id: "req-pending-1" } });
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    await flushReact();
+
+    expect(
+      view.container.querySelector('[data-testid="workspace-grid"]'),
+    ).not.toBeNull();
+    expect(
+      view.container.querySelector<HTMLButtonElement>(
+        '[data-testid="view-tab-approvals"]',
+      )?.getAttribute("aria-pressed"),
+    ).toBe("true");
+    expect(
+      view.container.querySelector<HTMLButtonElement>(
+        '[data-testid="queue-item"][data-request-id="req-pending-1"]',
+      )?.getAttribute("data-selected"),
+    ).toBe("true");
+
+    view.unmount();
+  });
+
+  it("saves manual local secrets with description, tags, and metadata", async () => {
+    let catalog: LocalSecretCatalog = {
+      catalog_path: "/tmp/plankton-secrets.toml",
+      literals: [],
+      imports: [],
+    };
+
+    tauri.listen.mockImplementation(async () => tauri.unlisten);
+    tauri.invoke.mockImplementation(
+      async (command: string, payload?: unknown) => {
+        switch (command) {
+          case "dashboard":
+            return DASHBOARD;
+          case "desktop_settings":
+            return SETTINGS;
+          case "consume_handoff_request":
+            return null;
+          case "list_local_secret_catalog_command":
+            return catalog;
+          case "list_onepassword_accounts_command":
+            return [];
+          case "upsert_local_secret_literal_command": {
+            const entry = (
+              payload as {
+                entry: {
+                  resource: string;
+                  value: string;
+                  display_name: string | null;
+                  description: string | null;
+                  tags: string[];
+                  metadata: Record<string, string>;
+                };
+              }
+            ).entry;
+            catalog = {
+              ...catalog,
+              literals: [
+                {
+                  resource: entry.resource,
+                  value: entry.value,
+                  display_name: entry.display_name,
+                  description: entry.description,
+                  tags: entry.tags,
+                  metadata: entry.metadata,
+                },
+              ],
+            };
+            return catalog.literals[0];
+          }
+          default:
+            throw new Error(`Unexpected command: ${command}`);
+        }
+      },
+    );
+
+    const view = render();
+    await flushReact();
+
+    click(
+      view.container.querySelector<HTMLButtonElement>(
+        '[data-testid="view-tab-password-management"]',
+      ),
+    );
+    await flushReact();
+    await flushReact();
+
+    click(
+      view.container.querySelector<HTMLButtonElement>(
+        '[data-testid="local-secret-create"]',
+      ),
+    );
+    await flushReact();
+
+    setFieldValue(
+      view.container.querySelector<HTMLInputElement>(
+        '[data-testid="local-secret-resource"] input',
+      ),
+      "secret/manual/demo",
+    );
+    setFieldValue(
+      view.container.querySelector<HTMLInputElement>(
+        '[data-testid="local-secret-display-name"] input',
+      ),
+      "Manual Demo",
+    );
+    setFieldValue(
+      view.container.querySelector<HTMLInputElement>(
+        '[data-testid="local-secret-description"] input',
+      ),
+      "local note",
+    );
+    setFieldValue(
+      view.container.querySelector<HTMLInputElement>(
+        '[data-testid="local-secret-tags"] input',
+      ),
+      "prod, db",
+    );
+    setFieldValue(
+      view.container.querySelector<HTMLTextAreaElement>(
+        '[data-testid="local-secret-metadata"] textarea',
+      ),
+      "owner=alice\nteam=platform",
+    );
+    setFieldValue(
+      view.container.querySelector<HTMLTextAreaElement>(
+        '[data-testid="local-secret-value"] textarea',
+      ),
+      "super-secret",
+    );
+    await flushReact();
+
+    await clickAsync(
+      view.container.querySelector<HTMLButtonElement>(
+        '[data-testid="local-secret-save"]',
+      ),
+    );
+    await flushReact();
+    await flushReact();
+
+    const saveCall = tauri.invoke.mock.calls.find(
+      ([command]) => command === "upsert_local_secret_literal_command",
+    );
+    expect(saveCall?.[1]).toEqual({
+      entry: {
+        resource: "secret/manual/demo",
+        value: "super-secret",
+        display_name: "Manual Demo",
+        description: "local note",
+        tags: ["prod", "db"],
+        metadata: {
+          owner: "alice",
+          team: "platform",
+        },
+      },
+    });
+    expect(
+      view.container.querySelector(
+        '[data-testid="imported-secret-catalog-notice"]',
+      )?.textContent,
+    ).toContain("secret/manual/demo");
 
     view.unmount();
   });

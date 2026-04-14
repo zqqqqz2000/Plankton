@@ -63,6 +63,7 @@ export type DesktopAppState = {
   settingsDraft: DesktopSettings | null;
   locale: Locale;
   pendingHandoffRequestId: string | null;
+  lastHandoffRequestId: string | null;
   selectedDetail: DetailSelection;
   noteDraft: string;
   errorMessage: string | null;
@@ -103,6 +104,7 @@ const INITIAL_STATE: DesktopAppState = {
   settingsDraft: null,
   locale: getInitialLocale(),
   pendingHandoffRequestId: null,
+  lastHandoffRequestId: null,
   selectedDetail: null,
   noteDraft: "",
   errorMessage: null,
@@ -477,6 +479,7 @@ export function useDesktopApp(): UseDesktopAppResult {
       setState((current) => ({
         ...current,
         pendingHandoffRequestId: normalizedRequestId,
+        lastHandoffRequestId: normalizedRequestId,
         noteDraft: "",
         errorMessage: null,
       }));

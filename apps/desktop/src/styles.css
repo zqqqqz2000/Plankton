@@ -519,6 +519,21 @@ button:disabled {
   gap: var(--space-2);
 }
 
+.provider-runtime-header-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+}
+
+.provider-runtime-card .ghost {
+  min-width: 96px;
+}
+
+.provider-runtime-summary {
+  margin-top: var(--space-2);
+}
+
 .catalog-toggle {
   justify-self: start;
 }

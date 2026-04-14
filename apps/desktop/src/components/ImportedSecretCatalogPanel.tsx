@@ -53,6 +53,10 @@ type ImportedEditorDraft = {
 type LiteralEditorDraft = {
   resource: string;
   value: string;
+  displayName: string;
+  description: string;
+  tags: string;
+  metadata: string;
 };
 
 const EMPTY_IMPORTED_DRAFT: ImportedEditorDraft = {
@@ -65,6 +69,10 @@ const EMPTY_IMPORTED_DRAFT: ImportedEditorDraft = {
 const EMPTY_LITERAL_DRAFT: LiteralEditorDraft = {
   resource: "",
   value: "",
+  displayName: "",
+  description: "",
+  tags: "",
+  metadata: "",
 };
 
 function caption(locale: Locale, english: string, chinese: string): string {
@@ -150,6 +158,19 @@ function buildCatalogEntries(catalog: LocalSecretCatalog | null): CatalogLeafEnt
       reference,
     })),
   ];
+}
+
+function buildLiteralEditorDraft(
+  literal: LocalSecretLiteralEntry,
+): LiteralEditorDraft {
+  return {
+    resource: literal.resource,
+    value: literal.value,
+    displayName: literal.display_name ?? "",
+    description: literal.description ?? "",
+    tags: (literal.tags ?? []).join(", "),
+    metadata: formatMetadataDraft(literal.metadata),
+  };
 }
 
 function buildCatalogTree(entries: CatalogLeafEntry[]): CatalogTreeNode[] {
@@ -264,7 +285,20 @@ function matchesSearch(entry: CatalogLeafEntry, query: string): boolean {
   }
 
   if (entry.kind === "literal") {
-    return entry.resource.toLowerCase().includes(normalizedQuery);
+    return [
+      entry.resource,
+      entry.literal.display_name ?? "",
+      entry.literal.description ?? "",
+      ...(entry.literal.tags ?? []),
+      ...Object.entries(entry.literal.metadata ?? {}).flatMap(([key, value]) => [
+        key,
+        value,
+        `${key}=${value}`,
+      ]),
+    ]
+      .join("\n")
+      .toLowerCase()
+      .includes(normalizedQuery);
   }
 
   return importedSearchText(entry.reference).includes(normalizedQuery);
@@ -331,8 +365,16 @@ function importedLeafSubtitle(reference: ImportedSecretReference): string {
   return reference.display_name;
 }
 
+function literalLeafSubtitle(literal: LocalSecretLiteralEntry): string {
+  return literal.display_name ?? literal.description ?? "";
+}
+
 function importedTagCount(reference: ImportedSecretReference): number {
   return reference.tags?.length ?? 0;
+}
+
+function literalTagCount(literal: LocalSecretLiteralEntry): number {
+  return literal.tags?.length ?? 0;
 }
 
 function importedDraftChanged(
@@ -382,6 +424,40 @@ function literalEditModeDescription(
   );
 }
 
+function literalDraftChanged(
+  literal: LocalSecretLiteralEntry,
+  draft: LiteralEditorDraft,
+  metadata: Record<string, string>,
+): boolean {
+  const normalizedTags = parseTags(draft.tags);
+  const currentTags = literal.tags ?? [];
+  const currentMetadata = literal.metadata ?? {};
+
+  if (literal.resource !== draft.resource.trim()) {
+    return true;
+  }
+  if (literal.value !== draft.value) {
+    return true;
+  }
+  if ((literal.display_name ?? "") !== draft.displayName.trim()) {
+    return true;
+  }
+  if ((literal.description ?? "") !== draft.description.trim()) {
+    return true;
+  }
+  if (normalizedTags.join("\n") !== currentTags.join("\n")) {
+    return true;
+  }
+
+  const leftMetadata = JSON.stringify(
+    Object.entries(metadata).sort(([left], [right]) => left.localeCompare(right)),
+  );
+  const rightMetadata = JSON.stringify(
+    Object.entries(currentMetadata).sort(([left], [right]) => left.localeCompare(right)),
+  );
+  return leftMetadata !== rightMetadata;
+}
+
 function TreeBranch(props: {
   locale: Locale;
   nodes: CatalogTreeNode[];
@@ -415,12 +491,13 @@ function TreeBranch(props: {
               <div className="queue-item-meta">
                 <span>
                   {node.entry.kind === "literal"
-                    ? caption(props.locale, "Local secret value", "本地密钥值")
+                    ? literalLeafSubtitle(node.entry.literal) ||
+                      caption(props.locale, "Local secret value", "本地密钥值")
                     : importedLeafSubtitle(node.entry.reference)}
                 </span>
                 <span>
                   {node.entry.kind === "literal"
-                    ? ""
+                    ? `${literalTagCount(node.entry.literal)} ${caption(props.locale, "tag(s)", "个标签")}`
                     : `${importedTagCount(node.entry.reference)} ${caption(props.locale, "tag(s)", "个标签")}`}
                 </span>
               </div>
@@ -476,6 +553,7 @@ export function ImportedSecretCatalogPanel(
   const selectedEntry =
     entries.find((entry) => entry.resource === selectedResource) ?? null;
   const metadataDraft = parseMetadataDraft(importedDraft.metadata);
+  const literalMetadataDraft = parseMetadataDraft(literalDraft.metadata);
 
   useEffect(() => {
     if (isCreatingLiteral) {
@@ -498,7 +576,6 @@ export function ImportedSecretCatalogPanel(
 
   useEffect(() => {
     if (isCreatingLiteral) {
-      setLiteralDraft(EMPTY_LITERAL_DRAFT);
       return;
     }
 
@@ -509,10 +586,7 @@ export function ImportedSecretCatalogPanel(
     }
 
     if (selectedEntry.kind === "literal") {
-      setLiteralDraft({
-        resource: selectedEntry.literal.resource,
-        value: selectedEntry.literal.value,
-      });
+      setLiteralDraft(buildLiteralEditorDraft(selectedEntry.literal));
       return;
     }
 
@@ -525,11 +599,19 @@ export function ImportedSecretCatalogPanel(
   }
 
   function startCreatingLiteral(resource?: string): void {
+    const selectedImported =
+      resource && selectedEntry?.kind === "imported"
+        ? selectedEntry.reference
+        : null;
     setIsCreatingLiteral(true);
     setSelectedResource(resource ?? null);
     setLiteralDraft({
       resource: resource ?? "",
       value: "",
+      displayName: selectedImported?.display_name ?? "",
+      description: selectedImported?.description ?? "",
+      tags: (selectedImported?.tags ?? []).join(", "),
+      metadata: formatMetadataDraft(selectedImported?.metadata),
     });
   }
 
@@ -562,7 +644,11 @@ export function ImportedSecretCatalogPanel(
 
   async function handleSaveLiteral(): Promise<void> {
     const resource = literalDraft.resource.trim();
-    if (resource.length === 0 || literalDraft.value.length === 0) {
+    if (
+      resource.length === 0 ||
+      literalDraft.value.length === 0 ||
+      literalMetadataDraft.invalidLines.length > 0
+    ) {
       return;
     }
 
@@ -571,6 +657,10 @@ export function ImportedSecretCatalogPanel(
       await props.onSaveLiteral({
         resource,
         value: literalDraft.value,
+        display_name: literalDraft.displayName.trim() || null,
+        description: literalDraft.description.trim() || null,
+        tags: parseTags(literalDraft.tags),
+        metadata: literalMetadataDraft.metadata,
       });
       setIsCreatingLiteral(false);
       setSelectedResource(resource);
@@ -622,13 +712,21 @@ export function ImportedSecretCatalogPanel(
       return false;
     }
     const resource = literalDraft.resource.trim();
-    if (resource.length === 0 || literalDraft.value.length === 0) {
+    if (
+      resource.length === 0 ||
+      literalDraft.value.length === 0 ||
+      literalMetadataDraft.invalidLines.length > 0
+    ) {
       return false;
     }
     if (!selectedEntry || selectedEntry.kind !== "literal") {
       return true;
     }
-    return literalDraft.value !== selectedEntry.literal.value;
+    return literalDraftChanged(
+      selectedEntry.literal,
+      literalDraft,
+      literalMetadataDraft.metadata,
+    );
   })();
 
   const totalCount = entries.length;
@@ -788,14 +886,104 @@ export function ImportedSecretCatalogPanel(
                     className="settings-input"
                     disabled={!isCreatingLiteral}
                     onChange={(event) => {
+                      const nextValue = event.currentTarget.value;
                       setLiteralDraft((current) => ({
                         ...current,
-                        resource: event.currentTarget.value,
+                        resource: nextValue,
                       }));
                     }}
                     type="text"
                     value={literalDraft.resource}
                   />
+                </label>
+
+                <label
+                  className="settings-field"
+                  data-testid="local-secret-display-name"
+                >
+                  <span className="field-label">
+                    {caption(props.locale, "Display Name", "显示名称")}
+                  </span>
+                  <input
+                    className="settings-input"
+                    onChange={(event) => {
+                      const nextValue = event.currentTarget.value;
+                      setLiteralDraft((current) => ({
+                        ...current,
+                        displayName: nextValue,
+                      }));
+                    }}
+                    type="text"
+                    value={literalDraft.displayName}
+                  />
+                </label>
+
+                <label
+                  className="settings-field"
+                  data-testid="local-secret-description"
+                >
+                  <span className="field-label">
+                    {caption(props.locale, "Description", "描述")}
+                  </span>
+                  <input
+                    className="settings-input"
+                    onChange={(event) => {
+                      const nextValue = event.currentTarget.value;
+                      setLiteralDraft((current) => ({
+                        ...current,
+                        description: nextValue,
+                      }));
+                    }}
+                    type="text"
+                    value={literalDraft.description}
+                  />
+                </label>
+
+                <label className="settings-field" data-testid="local-secret-tags">
+                  <span className="field-label">
+                    {caption(props.locale, "Tags", "标签")}
+                  </span>
+                  <input
+                    className="settings-input"
+                    onChange={(event) => {
+                      const nextValue = event.currentTarget.value;
+                      setLiteralDraft((current) => ({
+                        ...current,
+                        tags: nextValue,
+                      }));
+                    }}
+                    type="text"
+                    value={literalDraft.tags}
+                  />
+                </label>
+
+                <label
+                  className="settings-field settings-field-wide"
+                  data-testid="local-secret-metadata"
+                >
+                  <span className="field-label">
+                    {caption(props.locale, "Metadata", "元信息")}
+                  </span>
+                  <textarea
+                    className="settings-input note-field"
+                    onChange={(event) => {
+                      const nextValue = event.currentTarget.value;
+                      setLiteralDraft((current) => ({
+                        ...current,
+                        metadata: nextValue,
+                      }));
+                    }}
+                    value={literalDraft.metadata}
+                  />
+                  <span className="field-hint">
+                    {literalMetadataDraft.invalidLines.length > 0
+                      ? `${caption(props.locale, "Use KEY=VALUE lines.", "请使用 KEY=VALUE 格式。")} (${literalMetadataDraft.invalidLines.join(", ")})`
+                      : caption(
+                          props.locale,
+                          "Use one KEY=VALUE pair per line.",
+                          "每行使用一个 KEY=VALUE。",
+                        )}
+                  </span>
                 </label>
 
                 <label
@@ -808,9 +996,10 @@ export function ImportedSecretCatalogPanel(
                   <textarea
                     className="settings-input note-field"
                     onChange={(event) => {
+                      const nextValue = event.currentTarget.value;
                       setLiteralDraft((current) => ({
                         ...current,
-                        value: event.currentTarget.value,
+                        value: nextValue,
                       }));
                     }}
                     value={literalDraft.value}

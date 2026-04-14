@@ -339,7 +339,7 @@ export function getResolvedAutoDecisionEntries(
 
   return results.sort(
     (left, right) =>
-      Date.parse(left.recorded_at) - Date.parse(right.recorded_at),
+      Date.parse(right.recorded_at) - Date.parse(left.recorded_at),
   );
 }
 
@@ -388,7 +388,7 @@ export function getResolvedReviewRequestEntries(
 
   return results.sort(
     (left, right) =>
-      Date.parse(left.recorded_at) - Date.parse(right.recorded_at),
+      Date.parse(right.recorded_at) - Date.parse(left.recorded_at),
   );
 }
 

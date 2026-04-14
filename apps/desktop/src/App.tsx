@@ -703,7 +703,7 @@ function ContextCard(props: {
       data-testid="request-context-card"
     >
       <div className="detail-section-header">
-        <h3>{text(props.locale, "context")}</h3>
+        <h3>{text(props.locale, "callChain")}</h3>
       </div>
       <div className="context-stack">{groups}</div>
     </section>
@@ -886,6 +886,7 @@ function ProviderRuntimeCard(props: {
   providerTrace: ProviderTrace | null;
   testIdPrefix: string;
 }): JSX.Element {
+  const [isOpen, setIsOpen] = useState(false);
   const runtime = buildProviderRuntimeSummary({
     configuredProviderKind: props.configuredProviderKind,
     actualProviderKind: props.actualProviderKind,
@@ -936,7 +937,7 @@ function ProviderRuntimeCard(props: {
 
   return (
     <section
-      className="detail-section"
+      className="detail-section detail-section-low provider-runtime-card"
       data-testid={`${props.testIdPrefix}-provider-runtime-card`}
     >
       <div
@@ -944,42 +945,65 @@ function ProviderRuntimeCard(props: {
         data-testid={`${props.testIdPrefix}-provider-runtime-header`}
       >
         <h3>{text(props.locale, "providerRuntime")}</h3>
-        <span data-testid={`${props.testIdPrefix}-provider-runtime-state`}>
-          {providerLabelOrFallback(props.locale, runtime.actualProviderKind)}
-        </span>
-      </div>
-      <dl
-        className="facts"
-        data-testid={`${props.testIdPrefix}-provider-runtime-facts`}
-      >
-        <div data-testid={`${props.testIdPrefix}-configured-provider`}>
-          <dt>{text(props.locale, "configuredProvider")}</dt>
-          <dd>
-            {providerLabelOrFallback(
-              props.locale,
-              runtime.configuredProviderKind,
-            )}
-          </dd>
-        </div>
-        <div data-testid={`${props.testIdPrefix}-effective-provider`}>
-          <dt>{text(props.locale, "effectiveProvider")}</dt>
-          <dd>
+        <div className="provider-runtime-header-actions">
+          <span data-testid={`${props.testIdPrefix}-provider-runtime-state`}>
             {providerLabelOrFallback(props.locale, runtime.actualProviderKind)}
-          </dd>
+          </span>
+          <button
+            className="ghost"
+            data-testid={`${props.testIdPrefix}-provider-runtime-toggle`}
+            onClick={() => {
+              setIsOpen((current) => !current);
+            }}
+            type="button"
+          >
+            {isOpen
+              ? text(props.locale, "collapsePanel")
+              : text(props.locale, "expandPanel")}
+          </button>
         </div>
-        <div data-testid={`${props.testIdPrefix}-provider-runtime-status`}>
-          <dt>{text(props.locale, "providerRuntimeStatus")}</dt>
-          <dd>{statusMessage}</dd>
-        </div>
-        <div data-testid={`${props.testIdPrefix}-provider-runtime-trace`}>
-          <dt>{text(props.locale, "providerTraceState")}</dt>
-          <dd>
-            {runtime.traceAvailable
-              ? text(props.locale, "providerTraceVisible")
-              : text(props.locale, "providerTraceMissing")}
-          </dd>
-        </div>
-      </dl>
+      </div>
+      {isOpen ? (
+        <dl
+          className="facts"
+          data-testid={`${props.testIdPrefix}-provider-runtime-facts`}
+        >
+          <div data-testid={`${props.testIdPrefix}-configured-provider`}>
+            <dt>{text(props.locale, "configuredProvider")}</dt>
+            <dd>
+              {providerLabelOrFallback(
+                props.locale,
+                runtime.configuredProviderKind,
+              )}
+            </dd>
+          </div>
+          <div data-testid={`${props.testIdPrefix}-effective-provider`}>
+            <dt>{text(props.locale, "effectiveProvider")}</dt>
+            <dd>
+              {providerLabelOrFallback(props.locale, runtime.actualProviderKind)}
+            </dd>
+          </div>
+          <div data-testid={`${props.testIdPrefix}-provider-runtime-status`}>
+            <dt>{text(props.locale, "providerRuntimeStatus")}</dt>
+            <dd>{statusMessage}</dd>
+          </div>
+          <div data-testid={`${props.testIdPrefix}-provider-runtime-trace`}>
+            <dt>{text(props.locale, "providerTraceState")}</dt>
+            <dd>
+              {runtime.traceAvailable
+                ? text(props.locale, "providerTraceVisible")
+                : text(props.locale, "providerTraceMissing")}
+            </dd>
+          </div>
+        </dl>
+      ) : (
+        <p
+          className="section-copy provider-runtime-summary"
+          data-testid={`${props.testIdPrefix}-provider-runtime-summary`}
+        >
+          {statusMessage}
+        </p>
+      )}
     </section>
   );
 }
@@ -1457,14 +1481,6 @@ export function PendingRequestDetail(props: {
           </dl>
         </section>
 
-        <ProviderRuntimeCard
-          actualProviderKind={actualProviderKind}
-          configuredProviderKind={props.settings?.provider_kind ?? null}
-          locale={props.locale}
-          providerCalled={providerCalled}
-          providerTrace={suggestionTrace?.provider_trace ?? null}
-          testIdPrefix="request"
-        />
         <SuggestionCard
           locale={props.locale}
           suggestion={request.llm_suggestion}
@@ -1494,6 +1510,14 @@ export function PendingRequestDetail(props: {
             testId="request-audit-list"
           />
         </section>
+        <ProviderRuntimeCard
+          actualProviderKind={actualProviderKind}
+          configuredProviderKind={props.settings?.provider_kind ?? null}
+          locale={props.locale}
+          providerCalled={providerCalled}
+          providerTrace={suggestionTrace?.provider_trace ?? null}
+          testIdPrefix="request"
+        />
       </div>
     </>
   );
@@ -1631,14 +1655,6 @@ export function ResolvedAutoDetail(props: {
           </dl>
         </section>
 
-        <ProviderRuntimeCard
-          actualProviderKind={actualProviderKind}
-          configuredProviderKind={props.settings?.provider_kind ?? null}
-          locale={props.locale}
-          providerCalled={entry.automatic_decision.provider_called}
-          providerTrace={suggestionTrace?.provider_trace ?? null}
-          testIdPrefix="resolved-auto"
-        />
         <AcpTraceCard locale={props.locale} trace={suggestionTrace} />
         <ClaudeTraceCard locale={props.locale} trace={suggestionTrace} />
 
@@ -1664,6 +1680,14 @@ export function ResolvedAutoDetail(props: {
             testId="resolved-auto-audit-list"
           />
         </section>
+        <ProviderRuntimeCard
+          actualProviderKind={actualProviderKind}
+          configuredProviderKind={props.settings?.provider_kind ?? null}
+          locale={props.locale}
+          providerCalled={entry.automatic_decision.provider_called}
+          providerTrace={suggestionTrace?.provider_trace ?? null}
+          testIdPrefix="resolved-auto"
+        />
       </div>
     </>
   );
@@ -1837,14 +1861,6 @@ export function ResolvedReviewDetail(props: {
           </dl>
         </section>
 
-        <ProviderRuntimeCard
-          actualProviderKind={actualProviderKind}
-          configuredProviderKind={props.settings?.provider_kind ?? null}
-          locale={props.locale}
-          providerCalled={providerCalled}
-          providerTrace={suggestionTrace?.provider_trace ?? null}
-          testIdPrefix="resolved-review"
-        />
         <ResolvedSuggestionCard
           locale={props.locale}
           suggestion={suggestionSummary}
@@ -1874,6 +1890,14 @@ export function ResolvedReviewDetail(props: {
             testId="resolved-review-audit-list"
           />
         </section>
+        <ProviderRuntimeCard
+          actualProviderKind={actualProviderKind}
+          configuredProviderKind={props.settings?.provider_kind ?? null}
+          locale={props.locale}
+          providerCalled={providerCalled}
+          providerTrace={suggestionTrace?.provider_trace ?? null}
+          testIdPrefix="resolved-review"
+        />
       </div>
     </>
   );
@@ -2462,6 +2486,15 @@ export default function App(): JSX.Element {
     isSubmitting: state.isSubmitting,
     hasDashboard: state.dashboard !== null,
   });
+
+  useEffect(() => {
+    if (!state.lastHandoffRequestId) {
+      return;
+    }
+
+    setActiveView("approvals");
+  }, [state.lastHandoffRequestId]);
+
   const isApprovalView = activeView === "approvals";
   const toolbarHeading = isApprovalView
     ? text(state.locale, "toolbarTitle")

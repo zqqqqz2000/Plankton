@@ -84,7 +84,7 @@ impl SqliteReadStore {
                 decision AS final_decision, provider_kind, created_at, updated_at, resolved_at
             FROM approval_requests
             WHERE approval_status = ?
-            ORDER BY created_at ASC
+            ORDER BY created_at DESC
             LIMIT ?
             "#,
         )
@@ -134,7 +134,7 @@ impl SqliteReadStore {
                 created_at
             FROM audit_records
             WHERE request_id = ?
-            ORDER BY created_at ASC
+            ORDER BY created_at DESC
             "#,
         )
         .bind(request_id)

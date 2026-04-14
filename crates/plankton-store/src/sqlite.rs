@@ -252,7 +252,7 @@ impl SqliteStore {
                 automatic_decision_json, context_json, created_at, updated_at, resolved_at
             FROM access_requests
             WHERE approval_status = ?
-            ORDER BY created_at ASC
+            ORDER BY created_at DESC
             "#,
         )
         .bind("pending")
