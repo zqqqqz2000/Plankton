@@ -22,4 +22,14 @@ describe("i18n", () => {
     expect(translateCode("en", "acp_codex")).toBe("ACP");
     expect(translateCode("zh-CN", "acp_codex")).toBe("ACP");
   });
+
+  it("documents the full prompt i18n variable surface in settings help", () => {
+    expect(t("en", "settingsTemplateVariables")).toContain(
+      "{{ i18n.current_language }}",
+    );
+    expect(t("en", "settingsTemplateVariables")).not.toContain("{{ i18n.resource_label }}");
+    expect(t("zh-CN", "settingsTemplateVariables")).toContain(
+      "{{ i18n.current_language }}",
+    );
+  });
 });

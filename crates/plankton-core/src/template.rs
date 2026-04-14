@@ -9,15 +9,16 @@ pub const REQUEST_TEMPLATE_VERSION: &str = "3";
 pub const LLM_ADVICE_TEMPLATE_ID: &str = "llm_advice_request";
 pub const LLM_ADVICE_TEMPLATE_VERSION: &str = "3";
 
-pub const DEFAULT_REQUEST_TEMPLATE: &str = r#"{{ i18n.manual_review_request }}
-{{ i18n.resource_label }}: {{ context.resource }}
-{{ i18n.resource_tags_label }}:
+pub const DEFAULT_REQUEST_TEMPLATE: &str = r#"Manual review request
+Reply in language: {{ i18n.current_language }}
+Resource: {{ context.resource }}
+Resource tags:
 {% for tag in context.resource_tags %}
 - {{ tag }}
 {% else %}
 - n/a
 {% endfor %}
-{{ i18n.metadata_label }}:
+Metadata:
 {% for key, value in context.metadata|items %}
 - {{ key }}={{ value }}
 {% else %}
@@ -33,16 +34,17 @@ Return only a compact JSON object with keys:
 - risk_score: integer from 0 to 100
 Use escalate when the request is ambiguous or the provided context is not enough."#;
 
-pub const DEFAULT_LLM_ADVICE_TEMPLATE: &str = r#"{{ i18n.review_sanitized_access_request }}
-{{ i18n.prompt_contract_version_label }}: {{ prompt_contract_version }}
-{{ i18n.resource_label }}: {{ context.resource }}
-{{ i18n.resource_tags_label }}:
+pub const DEFAULT_LLM_ADVICE_TEMPLATE: &str = r#"Review this sanitized access request.
+Reply in language: {{ i18n.current_language }}
+Prompt contract version: {{ prompt_contract_version }}
+Resource: {{ context.resource }}
+Resource tags:
 {% for tag in context.resource_tags %}
 - {{ tag }}
 {% else %}
 - n/a
 {% endfor %}
-{{ i18n.metadata_label }}:
+Metadata:
 {% for key, value in context.metadata|items %}
 - {{ key }}={{ value }}
 {% else %}
@@ -52,12 +54,7 @@ pub const DEFAULT_LLM_ADVICE_TEMPLATE: &str = r#"{{ i18n.review_sanitized_access
 #[derive(Debug, Clone, Serialize)]
 pub struct PromptTemplateI18n {
     pub locale: String,
-    pub manual_review_request: &'static str,
-    pub review_sanitized_access_request: &'static str,
-    pub prompt_contract_version_label: &'static str,
-    pub resource_label: &'static str,
-    pub resource_tags_label: &'static str,
-    pub metadata_label: &'static str,
+    pub current_language: &'static str,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -110,21 +107,11 @@ fn prompt_template_i18n(locale: &str) -> PromptTemplateI18n {
     match locale {
         "zh-CN" => PromptTemplateI18n {
             locale: "zh-CN".to_string(),
-            manual_review_request: "人工审批请求",
-            review_sanitized_access_request: "请审阅这条已净化的访问请求。",
-            prompt_contract_version_label: "提示词契约版本",
-            resource_label: "资源",
-            resource_tags_label: "资源标签",
-            metadata_label: "元信息",
+            current_language: "Simplified Chinese",
         },
         _ => PromptTemplateI18n {
             locale: "en".to_string(),
-            manual_review_request: "Manual review request",
-            review_sanitized_access_request: "Review this sanitized access request.",
-            prompt_contract_version_label: "Prompt contract version",
-            resource_label: "Resource",
-            resource_tags_label: "Resource tags",
-            metadata_label: "Metadata",
+            current_language: "English",
         },
     }
 }
@@ -194,13 +181,71 @@ mod tests {
         ));
 
         let rendered = render_request_template(
-            "{{ locale }} {{ i18n.resource_label }} {{ context.resource }}",
+            "{{ locale }} {{ i18n.current_language }} {{ context.resource }}",
             &context,
             PolicyMode::ManualOnly,
             "zh-CN",
         )
         .expect("template should render");
 
-        assert_eq!(rendered, "zh-CN 资源 secret/api-token");
+        assert_eq!(rendered, "zh-CN Simplified Chinese secret/api-token");
+    }
+
+    #[test]
+    fn localizes_current_language_for_prompts() {
+        let context = sanitize_prompt_context(&RequestContext::new(
+            "secret/api-token".to_string(),
+            "Need smoke test access".to_string(),
+            "alice".to_string(),
+        ));
+
+        let rendered_en = render_request_template(
+            "Reply in language: {{ i18n.current_language }}",
+            &context,
+            PolicyMode::ManualOnly,
+            "en",
+        )
+        .expect("english template should render");
+        let rendered_zh = render_request_template(
+            "Reply in language: {{ i18n.current_language }}",
+            &context,
+            PolicyMode::Assisted,
+            "zh-CN",
+        )
+        .expect("chinese template should render");
+
+        assert_eq!(rendered_en, "Reply in language: English");
+        assert_eq!(rendered_zh, "Reply in language: Simplified Chinese");
+    }
+
+    #[test]
+    fn keeps_default_empty_state_copy_in_english() {
+        let context = sanitize_prompt_context(&RequestContext::new(
+            "secret/api-token".to_string(),
+            "Need smoke test access".to_string(),
+            "alice".to_string(),
+        ));
+
+        let rendered_request = render_request_template(
+            DEFAULT_REQUEST_TEMPLATE,
+            &context,
+            PolicyMode::ManualOnly,
+            "zh-CN",
+        )
+        .expect("request template should render");
+        let rendered_advice = render_llm_advice_template(
+            DEFAULT_LLM_ADVICE_TEMPLATE,
+            &context,
+            PolicyMode::Assisted,
+            "zh-CN",
+        )
+        .expect("advice template should render");
+
+        assert!(rendered_request.contains("Manual review request"));
+        assert!(rendered_request.contains("Reply in language: Simplified Chinese"));
+        assert!(rendered_request.contains("- n/a"));
+        assert!(rendered_advice.contains("Review this sanitized access request."));
+        assert!(rendered_advice.contains("Reply in language: Simplified Chinese"));
+        assert!(rendered_advice.contains("- n/a"));
     }
 }

@@ -73,7 +73,7 @@ const MESSAGES = {
     settingsRequestTemplate: "Review Template",
     settingsLlmAdviceTemplate: "LLM Advice Template",
     settingsTemplateVariables:
-      "Template variables: {{ locale }}, {{ i18n.resource_label }}, {{ i18n.resource_tags_label }}, {{ i18n.metadata_label }}, {{ context.resource }}, {{ context.resource_tags }}, {{ context.metadata }}, {{ policy_mode }}, {{ prompt_contract_version }}.",
+      "Template variables: {{ locale }}, {{ i18n.current_language }}, {{ context.resource }}, {{ context.resource_tags }}, {{ context.metadata }}, {{ policy_mode }}, {{ prompt_contract_version }}.",
     settingsCurrentPolicy: "Current Default",
     policyHumanReviewDesc:
       "Always hand off to a human reviewer in the desktop queue.",
@@ -331,7 +331,7 @@ const MESSAGES = {
     settingsRequestTemplate: "审批模板",
     settingsLlmAdviceTemplate: "LLM 建议模板",
     settingsTemplateVariables:
-      "模板变量：{{ locale }}、{{ i18n.resource_label }}、{{ i18n.resource_tags_label }}、{{ i18n.metadata_label }}、{{ context.resource }}、{{ context.resource_tags }}、{{ context.metadata }}、{{ policy_mode }}、{{ prompt_contract_version }}。",
+      "模板变量：{{ locale }}、{{ i18n.current_language }}、{{ context.resource }}、{{ context.resource_tags }}、{{ context.metadata }}、{{ policy_mode }}、{{ prompt_contract_version }}。",
     settingsCurrentPolicy: "当前默认策略",
     policyHumanReviewDesc: "所有新请求默认进入人工审批队列。",
     policyAssistDesc: "先展示 AI 建议，再由人工审批者做最终决定。",
