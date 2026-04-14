@@ -1,4 +1,5 @@
 use minijinja::{context, Environment, UndefinedBehavior};
+use serde_json::{json, Value};
 
 use crate::{PolicyMode, SanitizedPromptContext};
 
@@ -79,13 +80,57 @@ fn render_named_template(
     environment.set_undefined_behavior(UndefinedBehavior::Strict);
     environment.add_template("request", template)?;
     let template = environment.get_template("request")?;
+    let template_context = legacy_compatible_template_context(context);
     let rendered = template.render(context! {
-        context => context,
+        context => template_context,
         policy_mode => serde_json::to_string(&policy_mode).unwrap_or_else(|_| "manual_only".to_string()).replace('"', ""),
         prompt_contract_version => PROMPT_CONTRACT_VERSION,
     })?;
 
     Ok(rendered)
+}
+
+fn legacy_compatible_template_context(context: &SanitizedPromptContext) -> Value {
+    let mut value = serde_json::to_value(context).unwrap_or_else(|_| json!({}));
+    let object = value
+        .as_object_mut()
+        .expect("sanitized prompt context should serialize to an object");
+
+    object
+        .entry("resource".to_string())
+        .or_insert_with(|| json!(context.resource));
+    object
+        .entry("resource_tags".to_string())
+        .or_insert_with(|| json!(context.resource_tags));
+    object
+        .entry("metadata".to_string())
+        .or_insert_with(|| json!(context.metadata));
+    object
+        .entry("reason".to_string())
+        .or_insert_with(|| json!(""));
+    object
+        .entry("requested_by".to_string())
+        .or_insert_with(|| json!(""));
+    object
+        .entry("script_path".to_string())
+        .or_insert_with(|| Value::Null);
+    object
+        .entry("call_chain".to_string())
+        .or_insert_with(|| json!([]));
+    object
+        .entry("env_vars".to_string())
+        .or_insert_with(|| json!({}));
+    object
+        .entry("env_var_names".to_string())
+        .or_insert_with(|| json!([]));
+    object
+        .entry("redaction_summary".to_string())
+        .or_insert_with(|| json!(""));
+    object
+        .entry("redacted_fields".to_string())
+        .or_insert_with(|| json!([]));
+
+    value
 }
 
 #[cfg(test)]
@@ -136,5 +181,31 @@ mod tests {
         .expect_err("unknown prompt variables should fail");
 
         assert!(!error.to_string().trim().is_empty());
+    }
+
+    #[test]
+    fn renders_legacy_template_fields_with_empty_defaults() {
+        let context = sanitize_prompt_context(&RequestContext::new(
+            "secret/api-token".to_string(),
+            "Need smoke test access".to_string(),
+            "alice".to_string(),
+        ));
+
+        let rendered = render_request_template(
+            r#"Resource: {{ context.resource }}
+Reason: {{ context.reason }}
+Requester: {{ context.requested_by }}
+Env vars: {{ context.env_vars|items|list|length }}
+Call chain: {{ context.call_chain|length }}"#,
+            &context,
+            PolicyMode::ManualOnly,
+        )
+        .expect("legacy templates should still render with empty defaults");
+
+        assert!(rendered.contains("Resource: secret/api-token"));
+        assert!(rendered.contains("Reason: "));
+        assert!(rendered.contains("Requester: "));
+        assert!(rendered.contains("Env vars: 0"));
+        assert!(rendered.contains("Call chain: 0"));
     }
 }
