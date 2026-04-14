@@ -590,6 +590,47 @@ function ContextCard(props: {
 }): JSX.Element | null {
   const groups: JSX.Element[] = [];
   const { request } = props;
+  const resourceTags = request.context.resource_tags ?? [];
+  const resourceMetadata = request.context.resource_metadata ?? {};
+
+  if (resourceTags.length > 0) {
+    groups.push(
+      <div
+        className="context-group"
+        data-testid="resource-tags-card"
+        key="resource-tags"
+      >
+        <span className="context-label" data-testid="resource-tags-count">
+          {text(props.locale, "tags")}
+        </span>
+        <div className="imported-tag-list">
+          {resourceTags.map((tag) => (
+            <span className="id-pill" key={tag}>
+              {tag}
+            </span>
+          ))}
+        </div>
+      </div>,
+    );
+  }
+
+  if (Object.keys(resourceMetadata).length > 0) {
+    groups.push(
+      <div
+        className="context-group"
+        data-testid="resource-metadata-card"
+        key="resource-metadata"
+      >
+        <span className="context-label" data-testid="resource-metadata-count">
+          {text(props.locale, "metadata")}
+        </span>
+        <KeyValueList
+          testId="resource-metadata-list"
+          values={resourceMetadata}
+        />
+      </div>,
+    );
+  }
 
   if (request.context.script_path) {
     groups.push(

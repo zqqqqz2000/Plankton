@@ -754,7 +754,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn escalates_llm_automatic_before_provider_when_secret_exposure_risk_is_true() {
+    async fn omits_env_vars_before_provider_and_allows_low_risk_llm_automatic_request() {
         let settings = test_settings();
 
         let store = SqliteStore::new(&settings)
@@ -776,42 +776,42 @@ mod tests {
             .await
             .expect("automatic request should be inserted");
 
-        assert_eq!(request.approval_status, ApprovalStatus::Pending);
-        assert_eq!(request.final_decision, None);
+        assert_eq!(request.approval_status, ApprovalStatus::Approved);
+        assert_eq!(request.final_decision, Some(Decision::Allow));
         assert!(request.provider_input.is_some());
-        assert!(request.llm_suggestion.is_none());
+        assert!(request.llm_suggestion.is_some());
         assert_eq!(
             request
                 .automatic_decision
                 .as_ref()
                 .map(|decision| decision.auto_disposition),
-            Some(AutomaticDisposition::Escalate)
+            Some(AutomaticDisposition::Allow)
         );
         assert_eq!(
             request
                 .automatic_decision
                 .as_ref()
                 .map(|decision| decision.provider_called),
-            Some(false)
+            Some(true)
         );
 
         let fetched = store
             .get_request(&request.id)
             .await
             .expect("request should load");
-        assert_eq!(fetched.audit_records.len(), 3);
+        assert_eq!(fetched.audit_records.len(), 4);
         assert!(fetched
             .audit_records
             .iter()
-            .any(|record| record.action == AuditAction::AutomaticEscalatedToHuman));
+            .any(|record| record.action == AuditAction::AutomaticDecisionRecorded));
         assert_eq!(
             sqlx::query_scalar::<_, String>(
-                "SELECT actor_type FROM audit_records WHERE request_id = ? AND action = 'automatic_escalated_to_human'"
+                "SELECT actor_type FROM audit_records WHERE request_id = ? AND action = 'approval_recorded'"
             )
             .bind(&request.id)
             .fetch_one(&store.pool)
             .await
-            .expect("automatic escalation actor_type should be queryable"),
+            .expect("automatic approval actor_type should be queryable"),
             "system_auto"
         );
     }
@@ -855,9 +855,9 @@ mod tests {
             .await
             .expect("request should be inserted");
 
-        let (context_json, provider_input_json): (String, String) = sqlx::query_as(
+        let (resource, context_json, provider_input_json): (String, String, String) = sqlx::query_as(
             r#"
-            SELECT context_json, provider_input_json
+            SELECT resource, context_json, provider_input_json
             FROM access_requests
             WHERE id = ?
             "#,
@@ -867,8 +867,21 @@ mod tests {
         .await
         .expect("request payloads should be queryable");
 
+        assert_eq!(resource, "secret/demo");
         assert!(context_json.contains("/Users/jpx/private/run-secret.sh"));
-        assert!(provider_input_json.contains("/Users/jpx/private/run-secret.sh"));
+        assert!(!provider_input_json.contains("/Users/jpx/private/run-secret.sh"));
+        assert!(provider_input_json.contains("\"resource\":\"secret/demo\""));
+        assert!(provider_input_json.contains("\"resource_tags\":"));
+        assert!(provider_input_json.contains("\"metadata\":"));
+        assert!(!provider_input_json.contains("\"reason\":"));
+        assert!(!provider_input_json.contains("\"requested_by\":"));
+        assert!(!provider_input_json.contains("\"script_path\":"));
+        assert!(!provider_input_json.contains("\"call_chain\":"));
+        assert!(!provider_input_json.contains("\"env_vars\":"));
+        assert!(!provider_input_json.contains("\"env_var_names\":"));
+        assert!(!provider_input_json.contains("\"allowed_read_files\":"));
+        assert!(!provider_input_json.contains("\"redaction_summary\":"));
+        assert!(!provider_input_json.contains("\"redacted_fields\":"));
         assert!(!context_json.contains("sk-test-super-secret-value"));
         assert!(!context_json.contains("super-secret-session-token"));
         assert!(!context_json.contains("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"));

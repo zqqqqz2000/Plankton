@@ -18,6 +18,8 @@ export type CallChainEntry = string | StructuredCallChainNode;
 
 export type RequestContext = {
   resource: string;
+  resource_tags?: string[];
+  resource_metadata?: Record<string, string>;
   reason: string;
   requested_by: string;
   script_path: string | null;

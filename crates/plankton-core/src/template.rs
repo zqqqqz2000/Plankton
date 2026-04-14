@@ -2,27 +2,17 @@ use minijinja::{context, Environment, UndefinedBehavior};
 
 use crate::{PolicyMode, SanitizedPromptContext};
 
-pub const PROMPT_CONTRACT_VERSION: &str = "sanitized_prompt_context.v1";
+pub const PROMPT_CONTRACT_VERSION: &str = "sanitized_prompt_context.v2";
 pub const REQUEST_TEMPLATE_ID: &str = "manual_review_summary";
-pub const REQUEST_TEMPLATE_VERSION: &str = "1";
+pub const REQUEST_TEMPLATE_VERSION: &str = "2";
 pub const LLM_ADVICE_TEMPLATE_ID: &str = "llm_advice_request";
-pub const LLM_ADVICE_TEMPLATE_VERSION: &str = "1";
+pub const LLM_ADVICE_TEMPLATE_VERSION: &str = "2";
 
 pub const DEFAULT_REQUEST_TEMPLATE: &str = r#"Manual review request
-Actor: {{ context.requested_by }}
 Resource: {{ context.resource }}
-Reason: {{ context.reason }}
-Script path: {{ context.script_path or "n/a" }}
-Policy mode: {{ policy_mode }}
-Call chain:
-{% for step in context.call_chain %}
-- {{ step }}
-{% else %}
-- n/a
-{% endfor %}
-Environment variables (values already redacted):
-{% for key, value in context.env_vars|items %}
-- {{ key }}={{ value }}
+Resource tags:
+{% for tag in context.resource_tags %}
+- {{ tag }}
 {% else %}
 - n/a
 {% endfor %}
@@ -31,33 +21,23 @@ Metadata:
 - {{ key }}={{ value }}
 {% else %}
 - n/a
-{% endfor %}
-Redaction summary: {{ context.redaction_summary }}"#;
+{% endfor %}"#;
 
 pub const DEFAULT_LLM_SYSTEM_PROMPT: &str = r#"You are a cautious security review assistant.
-You only receive sanitized request context. Do not infer omitted or redacted secret values.
+You only receive the resource identifier, resource tags, and resource metadata.
+Do not infer omitted details or secret values.
 Return only a compact JSON object with keys:
 - suggested_decision: allow | deny | escalate
 - rationale_summary: short string
 - risk_score: integer from 0 to 100
-Use escalate when the request is ambiguous or the redacted context is not enough."#;
+Use escalate when the request is ambiguous or the provided context is not enough."#;
 
 pub const DEFAULT_LLM_ADVICE_TEMPLATE: &str = r#"Review this sanitized access request.
 Prompt contract version: {{ prompt_contract_version }}
-Policy mode: {{ policy_mode }}
 Resource: {{ context.resource }}
-Requester: {{ context.requested_by }}
-Reason: {{ context.reason }}
-Script path: {{ context.script_path or "n/a" }}
-Call chain:
-{% for step in context.call_chain %}
-- {{ step }}
-{% else %}
-- n/a
-{% endfor %}
-Environment variable names:
-{% for name in context.env_var_names %}
-- {{ name }}
+Resource tags:
+{% for tag in context.resource_tags %}
+- {{ tag }}
 {% else %}
 - n/a
 {% endfor %}
@@ -66,13 +46,6 @@ Metadata:
 - {{ key }}={{ value }}
 {% else %}
 - n/a
-{% endfor %}
-Redaction summary: {{ context.redaction_summary }}
-Redacted fields:
-{% for field in context.redacted_fields %}
-- {{ field }}
-{% else %}
-- none
 {% endfor %}"#;
 
 #[derive(Debug, thiserror::Error)]
@@ -128,8 +101,9 @@ mod tests {
             "Need smoke test access".to_string(),
             "alice".to_string(),
         );
+        context.resource_tags = vec!["prod".to_string()];
         context
-            .metadata
+            .resource_metadata
             .insert("environment".to_string(), "dev".to_string());
         context
             .env_vars
@@ -140,10 +114,10 @@ mod tests {
             render_request_template(DEFAULT_REQUEST_TEMPLATE, &context, PolicyMode::ManualOnly)
                 .expect("template should render");
 
-        assert!(rendered.contains("alice"));
         assert!(rendered.contains("secret/api-token"));
+        assert!(rendered.contains("prod"));
         assert!(rendered.contains("environment=dev"));
-        assert!(rendered.contains("OPENAI_API_KEY=[redacted]"));
+        assert!(!rendered.contains("OPENAI_API_KEY"));
     }
 
     #[test]

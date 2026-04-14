@@ -7,6 +7,7 @@ use uuid::Uuid;
 
 use crate::{
     deserialize_call_chain_nodes, AutomaticDecisionTrace, AutomaticDisposition, CallChainNode,
+    LLM_ADVICE_TEMPLATE_ID, LLM_ADVICE_TEMPLATE_VERSION, PROMPT_CONTRACT_VERSION,
 };
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -62,6 +63,10 @@ pub enum AuditAction {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RequestContext {
     pub resource: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub resource_tags: Vec<String>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub resource_metadata: BTreeMap<String, String>,
     pub reason: String,
     pub requested_by: String,
     pub script_path: Option<String>,
@@ -76,6 +81,8 @@ impl RequestContext {
     pub fn new(resource: String, reason: String, requested_by: String) -> Self {
         Self {
             resource,
+            resource_tags: Vec::new(),
+            resource_metadata: BTreeMap::new(),
             reason,
             requested_by,
             script_path: None,
@@ -90,25 +97,40 @@ impl RequestContext {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SanitizedPromptContext {
     pub resource: String,
-    pub reason: String,
-    pub requested_by: String,
-    pub script_path: Option<String>,
-    pub call_chain: Vec<String>,
-    pub env_vars: BTreeMap<String, String>,
-    pub env_var_names: Vec<String>,
+    #[serde(default)]
+    pub resource_tags: Vec<String>,
+    #[serde(default)]
     pub metadata: BTreeMap<String, String>,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub reason: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub requested_by: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub script_path: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub call_chain: Vec<String>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub env_vars: BTreeMap<String, String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub env_var_names: Vec<String>,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub redaction_summary: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub redacted_fields: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ProviderInputSnapshot {
+    #[serde(default = "default_llm_advice_template_id")]
     pub template_id: String,
+    #[serde(default = "default_llm_advice_template_version")]
     pub template_version: String,
+    #[serde(default = "default_prompt_contract_version")]
     pub prompt_contract_version: String,
+    #[serde(default)]
     pub prompt_sha256: String,
     pub prompt: String,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub allowed_read_files: Vec<String>,
     pub sanitized_context: SanitizedPromptContext,
 }
@@ -139,9 +161,13 @@ pub struct LlmSuggestionUsage {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct LlmSuggestion {
+    #[serde(default = "default_llm_advice_template_id")]
     pub template_id: String,
+    #[serde(default = "default_llm_advice_template_version")]
     pub template_version: String,
+    #[serde(default = "default_prompt_contract_version")]
     pub prompt_contract_version: String,
+    #[serde(default)]
     pub prompt_sha256: String,
     pub suggested_decision: SuggestedDecision,
     pub rationale_summary: String,
@@ -171,6 +197,18 @@ pub struct AccessRequest {
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
     pub resolved_at: Option<DateTime<Utc>>,
+}
+
+fn default_llm_advice_template_id() -> String {
+    LLM_ADVICE_TEMPLATE_ID.to_string()
+}
+
+fn default_llm_advice_template_version() -> String {
+    LLM_ADVICE_TEMPLATE_VERSION.to_string()
+}
+
+fn default_prompt_contract_version() -> String {
+    PROMPT_CONTRACT_VERSION.to_string()
 }
 
 impl AccessRequest {
@@ -209,6 +247,8 @@ impl AccessRequest {
             json!({
                 "policy_mode": self.policy_mode,
                 "resource": self.context.resource,
+                "resource_tags": self.context.resource_tags,
+                "resource_metadata": self.context.resource_metadata,
             }),
         )
     }
@@ -526,15 +566,14 @@ mod tests {
             suggested_decision: Some(SuggestedDecision::Allow),
             risk_score: Some(20),
             template_id: Some("llm_advice_request".to_string()),
-            template_version: Some("1".to_string()),
-            prompt_contract_version: Some("sanitized_prompt_context.v1".to_string()),
+            template_version: Some("2".to_string()),
+            prompt_contract_version: Some("sanitized_prompt_context.v2".to_string()),
             provider_kind: Some("mock".to_string()),
             provider_model: Some("mock-suggestion-v1".to_string()),
             x_request_id: None,
             provider_response_id: None,
             redacted_fields: Vec::new(),
-            redaction_summary:
-                "provider input only exposes the explicit prompt-contract allow-list".to_string(),
+            redaction_summary: String::new(),
             auto_rationale_summary:
                 "Automatic mode allowed the request because the suggestion was low-risk".to_string(),
             fail_closed: false,

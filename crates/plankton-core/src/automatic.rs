@@ -174,14 +174,6 @@ pub fn evaluate_local_hard_rules(
 
 pub fn secret_exposure_risk(sanitized_context: &SanitizedPromptContext) -> bool {
     !sanitized_context.redacted_fields.is_empty()
-        || sanitized_context
-            .redaction_summary
-            .to_ascii_lowercase()
-            .contains("redacted")
-        || sanitized_context
-            .redaction_summary
-            .to_ascii_lowercase()
-            .contains("environment variable value")
 }
 
 pub fn escalate_for_secret_exposure_risk(
@@ -625,7 +617,7 @@ mod tests {
     }
 
     #[test]
-    fn secret_exposure_risk_blocks_provider_execution() {
+    fn omitted_sensitive_fields_do_not_trigger_secret_exposure_risk() {
         let mut context = sample_request_context();
         context.env_vars.insert(
             "OPENAI_API_KEY".to_string(),
@@ -633,13 +625,7 @@ mod tests {
         );
         let sanitized = sanitize_prompt_context(&context);
 
-        assert!(secret_exposure_risk(&sanitized));
-
-        let trace = escalate_for_secret_exposure_risk(&sanitized, None);
-
-        assert_eq!(trace.auto_disposition, AutomaticDisposition::Escalate);
-        assert!(trace.secret_exposure_risk);
-        assert!(!trace.provider_called);
+        assert!(!secret_exposure_risk(&sanitized));
     }
 
     #[test]

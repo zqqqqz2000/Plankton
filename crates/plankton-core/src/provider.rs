@@ -87,9 +87,14 @@ impl ProviderAdapter for MockProviderAdapter {
         } else if request.sanitized_context.resource.contains("prod")
             || request
                 .sanitized_context
-                .reason
-                .to_ascii_lowercase()
-                .contains("production")
+                .resource_tags
+                .iter()
+                .any(|tag| tag.to_ascii_lowercase().contains("prod"))
+            || request
+                .sanitized_context
+                .metadata
+                .values()
+                .any(|value| value.to_ascii_lowercase().contains("prod"))
         {
             SuggestedDecision::Deny
         } else {
@@ -106,7 +111,7 @@ impl ProviderAdapter for MockProviderAdapter {
                 82,
             ),
             SuggestedDecision::Escalate => (
-                "Mock provider escalated because provider-visible context was redacted".to_string(),
+                "Mock provider escalated because the visible context was incomplete".to_string(),
                 68,
             ),
         };
@@ -514,7 +519,7 @@ pub async fn generate_llm_suggestion(
 pub fn build_provider_input_snapshot(
     settings: &PlanktonSettings,
     policy_mode: PolicyMode,
-    context: &RequestContext,
+    _context: &RequestContext,
     sanitized_context: &SanitizedPromptContext,
 ) -> Result<ProviderInputSnapshot, ProviderError> {
     let prompt = render_llm_advice_template(
@@ -529,11 +534,7 @@ pub fn build_provider_input_snapshot(
         prompt_contract_version: PROMPT_CONTRACT_VERSION.to_string(),
         prompt_sha256: prompt_sha256.clone(),
         prompt: prompt.clone(),
-        allowed_read_files: context
-            .call_chain
-            .iter()
-            .filter_map(|node| node.previewable_path().map(ToOwned::to_owned))
-            .collect(),
+        allowed_read_files: Vec::new(),
         sanitized_context: sanitized_context.clone(),
     })
 }

@@ -14,11 +14,11 @@ use clap::{ArgGroup, Args, Parser, Subcommand, ValueEnum};
 use desktop_handoff::maybe_trigger_desktop_handoff;
 use plankton_core::{
     collect_runtime_call_chain, default_value_resolver, derive_script_path,
-    import_secret_reference, load_settings, prompt_call_chain_paths, AccessRequest, ApprovalStatus,
-    AuditAction, AuditRecord, AutomaticDecisionSource, AutomaticDecisionTrace,
-    AutomaticDisposition, Decision, LlmSuggestion, LlmSuggestionUsage, PlanktonSettings,
-    PolicyMode, ProviderTrace, RequestContext, SecretImportSpec, SecretSourceLocator,
-    SuggestedDecision, ValueResolver, ValueResolverError,
+    import_secret_reference, list_local_secret_catalog, load_settings, prompt_call_chain_paths,
+    AccessRequest, ApprovalStatus, AuditAction, AuditRecord, AutomaticDecisionSource,
+    AutomaticDecisionTrace, AutomaticDisposition, Decision, LlmSuggestion, LlmSuggestionUsage,
+    PlanktonSettings, PolicyMode, ProviderTrace, RequestContext, SecretImportSpec,
+    SecretSourceLocator, SuggestedDecision, ValueResolver, ValueResolverError,
 };
 use plankton_store::{RequestQueryResult, SqliteStore};
 use serde::Serialize;
@@ -514,13 +514,18 @@ async fn run() -> Result<ExitCode> {
             } = args;
             let call_chain =
                 collect_runtime_call_chain().context("failed to collect runtime call chain")?;
+            let requested_resource = resource
+                .or(resource_flag)
+                .expect("clap should require a resource");
             let mut context = RequestContext::new(
-                resource
-                    .or(resource_flag)
-                    .expect("clap should require a resource"),
+                requested_resource.clone(),
                 reason,
                 requested_by.unwrap_or_else(default_actor),
             );
+            let (resource_tags, resource_metadata) =
+                load_request_resource_annotations(requested_resource.as_str())?;
+            context.resource_tags = resource_tags;
+            context.resource_metadata = resource_metadata;
             context.script_path = derive_script_path(&call_chain);
             context.call_chain = call_chain;
             context.env_vars = parse_key_values("env", env_vars)?;
@@ -588,6 +593,22 @@ async fn wait_for_terminal_request(
 fn init_tracing() {
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
     let _ = fmt().with_env_filter(filter).without_time().try_init();
+}
+
+fn load_request_resource_annotations(
+    resource: &str,
+) -> Result<(Vec<String>, BTreeMap<String, String>)> {
+    let catalog = list_local_secret_catalog()
+        .context("failed to inspect the local secret catalog for resource metadata")?;
+    let entry = catalog
+        .imports
+        .into_iter()
+        .find(|reference| reference.resource == resource);
+
+    Ok(match entry {
+        Some(reference) => (reference.tags, reference.metadata),
+        None => (Vec::new(), BTreeMap::new()),
+    })
 }
 
 fn default_actor() -> String {
@@ -2923,8 +2944,8 @@ mod tests {
                 suggested_decision: None,
                 risk_score: None,
                 template_id: Some("llm_advice_request".to_string()),
-                template_version: Some("1".to_string()),
-                prompt_contract_version: Some("sanitized_prompt_context.v1".to_string()),
+                template_version: Some("2".to_string()),
+                prompt_contract_version: Some("sanitized_prompt_context.v2".to_string()),
                 provider_kind: Some("mock".to_string()),
                 provider_model: None,
                 x_request_id: Some("trace-123".to_string()),
@@ -2986,8 +3007,8 @@ mod tests {
                 suggested_decision: None,
                 risk_score: None,
                 template_id: Some("llm_advice_request".to_string()),
-                template_version: Some("1".to_string()),
-                prompt_contract_version: Some("sanitized_prompt_context.v1".to_string()),
+                template_version: Some("2".to_string()),
+                prompt_contract_version: Some("sanitized_prompt_context.v2".to_string()),
                 provider_kind: Some("mock".to_string()),
                 provider_model: None,
                 x_request_id: None,

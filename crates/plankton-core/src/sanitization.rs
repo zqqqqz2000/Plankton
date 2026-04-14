@@ -1,4 +1,4 @@
-use std::{collections::BTreeMap, path::Path};
+use std::collections::BTreeMap;
 
 use crate::{CallChainNode, RequestContext, SanitizedPromptContext};
 
@@ -19,88 +19,51 @@ const SENSITIVE_MARKERS: [&str; 12] = [
 ];
 
 pub fn sanitize_prompt_context(context: &RequestContext) -> SanitizedPromptContext {
-    let mut redacted_fields = Vec::new();
-    let mut notes = Vec::new();
-
-    let resource = sanitize_text(
-        "resource",
-        &context.resource,
-        &mut redacted_fields,
-        &mut notes,
-    );
-    let reason = sanitize_text("reason", &context.reason, &mut redacted_fields, &mut notes);
-    let requested_by = sanitize_text(
-        "requested_by",
-        &context.requested_by,
-        &mut redacted_fields,
-        &mut notes,
-    );
-    let script_path = context
-        .script_path
-        .as_ref()
-        .map(|value| sanitize_path_text("script_path", value, &mut redacted_fields, &mut notes));
-    let call_chain = context
-        .call_chain
+    let resource = context.resource.trim().to_string();
+    let resource_tags = context
+        .resource_tags
         .iter()
-        .filter_map(|node| {
-            node.prompt_display_path().map(|value| {
-                sanitize_path_text("call_chain", value, &mut redacted_fields, &mut notes)
-            })
-        })
+        .map(|value| value.trim())
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
         .collect::<Vec<_>>();
-
-    let env_var_names = context.env_vars.keys().cloned().collect::<Vec<_>>();
-    let env_vars = context
-        .env_vars
-        .keys()
-        .map(|key| {
-            redacted_fields.push(format!("env_vars.{key}"));
-            (key.clone(), REDACTED_VALUE.to_string())
-        })
+    let metadata = context
+        .resource_metadata
+        .iter()
+        .map(|(key, value)| (key.trim().to_string(), value.trim().to_string()))
+        .filter(|(key, value)| !key.is_empty() && !value.is_empty())
         .collect::<BTreeMap<_, _>>();
-    if !env_var_names.is_empty() {
-        notes.push(format!(
-            "provider input omits {} environment variable value(s)",
-            env_var_names.len()
-        ));
-    }
-
-    let metadata = sanitize_metadata(&context.metadata, &mut redacted_fields, &mut notes);
-
-    redacted_fields.sort();
-    redacted_fields.dedup();
-
-    let redaction_summary = if notes.is_empty() {
-        "provider input only exposes the explicit prompt-contract allow-list".to_string()
-    } else {
-        notes.join("; ")
-    };
 
     SanitizedPromptContext {
         resource,
-        reason,
-        requested_by,
-        script_path,
-        call_chain,
-        env_vars,
-        env_var_names,
+        resource_tags,
         metadata,
-        redaction_summary,
-        redacted_fields,
+        reason: String::new(),
+        requested_by: String::new(),
+        script_path: None,
+        call_chain: Vec::new(),
+        env_vars: BTreeMap::new(),
+        env_var_names: Vec::new(),
+        redaction_summary: String::new(),
+        redacted_fields: Vec::new(),
     }
 }
 
 pub fn sanitize_request_context_for_storage(context: &RequestContext) -> RequestContext {
-    let sanitized = sanitize_prompt_context(context);
-
     RequestContext {
-        resource: sanitized.resource,
-        reason: sanitized.reason,
-        requested_by: sanitized.requested_by,
-        script_path: sanitized.script_path,
+        resource: context.resource.trim().to_string(),
+        resource_tags: context.resource_tags.clone(),
+        resource_metadata: context.resource_metadata.clone(),
+        reason: context.reason.trim().to_string(),
+        requested_by: context.requested_by.trim().to_string(),
+        script_path: context.script_path.clone(),
         call_chain: sanitize_call_chain_for_storage(context),
-        env_vars: sanitized.env_vars,
-        metadata: sanitized.metadata,
+        env_vars: context
+            .env_vars
+            .keys()
+            .map(|key| (key.clone(), REDACTED_VALUE.to_string()))
+            .collect(),
+        metadata: sanitize_request_metadata_for_storage(&context.metadata),
         created_at: context.created_at,
     }
 }
@@ -131,67 +94,6 @@ fn sanitize_call_chain_for_storage(context: &RequestContext) -> Vec<CallChainNod
         .collect()
 }
 
-fn sanitize_metadata(
-    values: &BTreeMap<String, String>,
-    redacted_fields: &mut Vec<String>,
-    notes: &mut Vec<String>,
-) -> BTreeMap<String, String> {
-    values
-        .iter()
-        .map(|(key, value)| {
-            let value = if looks_sensitive_key(key) || looks_sensitive_value(value) {
-                redacted_fields.push(format!("metadata.{key}"));
-                notes.push(format!("redacted metadata field {key}"));
-                REDACTED_VALUE.to_string()
-            } else {
-                sanitize_text(&format!("metadata.{key}"), value, redacted_fields, notes)
-            };
-
-            (key.clone(), value)
-        })
-        .collect()
-}
-
-fn sanitize_text(
-    field_name: &str,
-    value: &str,
-    redacted_fields: &mut Vec<String>,
-    notes: &mut Vec<String>,
-) -> String {
-    if looks_absolute_path(value) {
-        redacted_fields.push(field_name.to_string());
-        notes.push(format!("trimmed absolute path from {field_name}"));
-        return sanitize_absolute_path(value);
-    }
-
-    if looks_sensitive_value(value) {
-        redacted_fields.push(field_name.to_string());
-        notes.push(format!(
-            "redacted {field_name} because it looked secret-like"
-        ));
-        return REDACTED_VALUE.to_string();
-    }
-
-    value.trim().to_string()
-}
-
-fn sanitize_path_text(
-    field_name: &str,
-    value: &str,
-    redacted_fields: &mut Vec<String>,
-    notes: &mut Vec<String>,
-) -> String {
-    if looks_sensitive_value(value) && !looks_absolute_path(value) {
-        redacted_fields.push(field_name.to_string());
-        notes.push(format!(
-            "redacted {field_name} because it looked secret-like"
-        ));
-        return REDACTED_VALUE.to_string();
-    }
-
-    value.trim().to_string()
-}
-
 fn sanitize_path_value_for_storage(value: &str) -> String {
     if looks_sensitive_value(value) && !looks_absolute_path(value) {
         REDACTED_VALUE.to_string()
@@ -216,17 +118,23 @@ pub(crate) fn looks_absolute_path(value: &str) -> bool {
         )
 }
 
-fn sanitize_absolute_path(value: &str) -> String {
-    let trimmed = value.trim();
-    Path::new(trimmed)
-        .file_name()
-        .and_then(|segment| segment.to_str())
-        .map(ToOwned::to_owned)
-        .filter(|segment| !segment.is_empty())
-        .unwrap_or_else(|| REDACTED_VALUE.to_string())
+fn sanitize_request_metadata_for_storage(
+    metadata: &BTreeMap<String, String>,
+) -> BTreeMap<String, String> {
+    metadata
+        .iter()
+        .map(|(key, value)| {
+            let sanitized = if looks_sensitive_key(key) || looks_sensitive_value(value) {
+                REDACTED_VALUE.to_string()
+            } else {
+                value.trim().to_string()
+            };
+            (key.clone(), sanitized)
+        })
+        .collect()
 }
 
-pub(crate) fn looks_sensitive_key(key: &str) -> bool {
+fn looks_sensitive_key(key: &str) -> bool {
     let normalized = key.to_ascii_lowercase();
     SENSITIVE_MARKERS
         .iter()
@@ -282,12 +190,16 @@ mod tests {
     use super::{sanitize_prompt_context, sanitize_request_context_for_storage};
 
     #[test]
-    fn redacts_env_values_and_sensitive_metadata() {
+    fn limits_provider_context_to_resource_tags_and_resource_metadata() {
         let mut context = RequestContext::new(
             "secret/demo".to_string(),
             "Need smoke test access".to_string(),
             "alice".to_string(),
         );
+        context.resource_tags = vec!["prod".to_string(), "db".to_string()];
+        context
+            .resource_metadata
+            .insert("environment".to_string(), "dev".to_string());
         context.env_vars.insert(
             "OPENAI_API_KEY".to_string(),
             "sk-test-super-secret-value".to_string(),
@@ -302,28 +214,23 @@ mod tests {
 
         let sanitized = sanitize_prompt_context(&context);
 
-        assert_eq!(
-            sanitized.env_vars.get("OPENAI_API_KEY"),
-            Some(&"[redacted]".to_string())
-        );
+        assert_eq!(sanitized.resource, "secret/demo");
+        assert_eq!(sanitized.resource_tags, vec!["prod".to_string(), "db".to_string()]);
         assert_eq!(
             sanitized.metadata.get("environment"),
             Some(&"dev".to_string())
         );
-        assert_eq!(
-            sanitized.metadata.get("api_token"),
-            Some(&"[redacted]".to_string())
-        );
-        assert!(sanitized
-            .redacted_fields
-            .contains(&"env_vars.OPENAI_API_KEY".to_string()));
-        assert!(sanitized
-            .redacted_fields
-            .contains(&"metadata.api_token".to_string()));
+        assert!(sanitized.metadata.get("api_token").is_none());
+        assert!(sanitized.env_vars.is_empty());
+        assert!(sanitized.env_var_names.is_empty());
+        assert!(sanitized.call_chain.is_empty());
+        assert!(sanitized.reason.is_empty());
+        assert!(sanitized.requested_by.is_empty());
+        assert!(sanitized.redacted_fields.is_empty());
     }
 
     #[test]
-    fn preserves_paths_but_strips_preview_content_from_prompt_and_storage_contexts() {
+    fn omits_paths_from_provider_context_and_strips_preview_content_from_storage_context() {
         let mut context = RequestContext::new(
             "secret/demo".to_string(),
             "Need smoke test access".to_string(),
@@ -340,18 +247,12 @@ mod tests {
         let prompt_context = sanitize_prompt_context(&context);
         let stored_context = sanitize_request_context_for_storage(&context);
 
-        assert_eq!(
-            prompt_context.script_path.as_deref(),
-            Some("/Users/jpx/private/run-secret.sh")
-        );
+        assert_eq!(prompt_context.script_path.as_deref(), None);
         assert_eq!(
             stored_context.script_path.as_deref(),
             Some("/Users/jpx/private/run-secret.sh")
         );
-        assert_eq!(
-            prompt_context.call_chain[0],
-            "/Users/jpx/private/run-secret.sh"
-        );
+        assert!(prompt_context.call_chain.is_empty());
         assert_eq!(
             stored_context.call_chain[0].resolved_file_path.as_deref(),
             Some("/Users/jpx/private/run-secret.sh")
