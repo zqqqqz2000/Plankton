@@ -12,10 +12,11 @@ import type {
   ImportFieldOption,
   ImportPickerOption,
   ImportedSecretBatchReceipt,
-  ImportedSecretCatalog,
   ImportedSecretReceipt,
   ImportedSecretReference,
   ImportedSecretReferenceUpdate,
+  LocalSecretCatalog,
+  LocalSecretLiteralUpsert,
   SecretImportBatchSpec,
   SecretImportSpec,
   SecretSourceLocator,
@@ -78,6 +79,14 @@ type ResourcePreviewResult = {
   resource: string | null;
 };
 type FieldOptionsByResourceId = Record<string, ImportFieldOption[]>;
+type SavedResourceTemplate = {
+  id: string;
+  name: string;
+  providerKind: SecretImportProviderKind;
+  template: string;
+  createdAt: string;
+  updatedAt: string;
+};
 
 type PickerRenderableOption = {
   id: string;
@@ -182,6 +191,8 @@ const EMPTY_DOTENV_DRAFT: DotenvDraft = {
   prefix: "",
   key: "",
 };
+const SAVED_RESOURCE_TEMPLATES_STORAGE_KEY =
+  "plankton.desktop.saved-resource-templates";
 
 function optionalValue(value: string): string | null {
   const trimmed = value.trim();
@@ -228,6 +239,132 @@ function parseMetadataDraft(value: string): {
     metadata,
     invalidLines,
   };
+}
+
+function rawErrorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+function providerDisplayName(
+  locale: Locale,
+  providerKind: string,
+): string {
+  if (providerKind === "1password_cli") {
+    return translateCode(locale, "1password_cli");
+  }
+  if (providerKind === "bitwarden_cli") {
+    return translateCode(locale, "bitwarden_cli");
+  }
+  if (providerKind === "dotenv_file") {
+    return translateCode(locale, "dotenv_file");
+  }
+  return providerKind;
+}
+
+function formatUserFacingImportError(locale: Locale, error: unknown): string {
+  const message = rawErrorMessage(error);
+
+  const emptyFieldMatch = message.match(
+    /failed to verify imported source for (.+): (\w+) source for .+ contained field (.+), but its value was empty/i,
+  );
+  if (emptyFieldMatch) {
+    const [, resource, providerKind, field] = emptyFieldMatch;
+    const providerName = providerDisplayName(locale, providerKind);
+    return sectionCaption(
+      locale,
+      `Import failed: ${providerName} field ${field} for ${resource} is empty. Deselect it or add a value in the provider, then retry.`,
+      `导入失败：${providerName} 中 ${resource} 的字段 ${field} 为空。请取消选择该字段，或先在提供方中补上值后重试。`,
+    );
+  }
+
+  const missingFieldMatch = message.match(
+    /failed to verify imported source for (.+): (\w+) source for .+ did not contain field (.+)/i,
+  );
+  if (missingFieldMatch) {
+    const [, resource, providerKind, field] = missingFieldMatch;
+    const providerName = providerDisplayName(locale, providerKind);
+    return sectionCaption(
+      locale,
+      `Import failed: ${providerName} field ${field} for ${resource} was not found. Refresh the item fields and retry.`,
+      `导入失败：${providerName} 中 ${resource} 的字段 ${field} 未找到。请刷新字段列表后重试。`,
+    );
+  }
+
+  const verifyMatch = message.match(
+    /failed to verify imported source for (.+): (.+)/i,
+  );
+  if (verifyMatch) {
+    const [, resource, detail] = verifyMatch;
+    return sectionCaption(
+      locale,
+      `Import failed while verifying ${resource}: ${detail}`,
+      `校验导入资源 ${resource} 失败：${detail}`,
+    );
+  }
+
+  return message;
+}
+
+function loadSavedResourceTemplates(): SavedResourceTemplate[] {
+  const raw = window.localStorage.getItem(SAVED_RESOURCE_TEMPLATES_STORAGE_KEY);
+  if (!raw) {
+    return [];
+  }
+
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    if (!Array.isArray(parsed)) {
+      return [];
+    }
+
+    return parsed.flatMap((entry) => {
+      if (
+        !entry ||
+        typeof entry !== "object" ||
+        !("id" in entry) ||
+        !("name" in entry) ||
+        !("providerKind" in entry) ||
+        !("template" in entry) ||
+        !("createdAt" in entry) ||
+        !("updatedAt" in entry)
+      ) {
+        return [];
+      }
+
+      const template = entry as SavedResourceTemplate;
+      if (
+        typeof template.id !== "string" ||
+        typeof template.name !== "string" ||
+        typeof template.providerKind !== "string" ||
+        typeof template.template !== "string" ||
+        typeof template.createdAt !== "string" ||
+        typeof template.updatedAt !== "string"
+      ) {
+        return [];
+      }
+
+      if (
+        template.providerKind !== "1password_cli" &&
+        template.providerKind !== "bitwarden_cli" &&
+        template.providerKind !== "dotenv_file"
+      ) {
+        return [];
+      }
+
+      return [template];
+    });
+  } catch {
+    return [];
+  }
+}
+
+function persistSavedResourceTemplates(
+  templates: SavedResourceTemplate[],
+): void {
+  window.localStorage.setItem(
+    SAVED_RESOURCE_TEMPLATES_STORAGE_KEY,
+    JSON.stringify(templates),
+  );
 }
 
 function normalizeResourceSegment(value: string): string | null {
@@ -780,6 +917,12 @@ export function PasswordManagementView(
   const [resourceTemplateMode, setResourceTemplateMode] =
     useState<ResourceTemplateMode>("default");
   const [resourceTemplate, setResourceTemplate] = useState("");
+  const [resourceTemplateName, setResourceTemplateName] = useState("");
+  const [selectedSavedResourceTemplateId, setSelectedSavedResourceTemplateId] =
+    useState<string | null>(null);
+  const [savedResourceTemplates, setSavedResourceTemplates] = useState<
+    SavedResourceTemplate[]
+  >(() => loadSavedResourceTemplates());
   const [commonDraft, setCommonDraft] =
     useState<CommonImportDraft>(EMPTY_COMMON_DRAFT);
   const [onePasswordDraft, setOnePasswordDraft] = useState<OnePasswordDraft>(
@@ -792,7 +935,7 @@ export function PasswordManagementView(
     useState<DotenvDraft>(EMPTY_DOTENV_DRAFT);
   const [receipts, setReceipts] = useState<ImportedSecretReceipt[]>([]);
   const [importedCatalog, setImportedCatalog] =
-    useState<ImportedSecretCatalog | null>(null);
+    useState<LocalSecretCatalog | null>(null);
   const [browseErrorMessage, setBrowseErrorMessage] = useState<string | null>(
     null,
   );
@@ -899,6 +1042,9 @@ export function PasswordManagementView(
   const selectedProvider = PROVIDER_OPTIONS.find(
     (option) => option.kind === providerKind,
   );
+  const visibleSavedResourceTemplates = savedResourceTemplates.filter(
+    (template) => template.providerKind === providerKind,
+  );
   const selectedOnePasswordAccount =
     onePasswordAccounts.find(
       (option) => option.id === selectedOnePasswordAccountId,
@@ -986,7 +1132,94 @@ export function PasswordManagementView(
   let plannedSpecs: SecretImportSpec[] = [];
   let planBlockerMessage: string | null = null;
 
+  if (providerKind === "1password_cli") {
+    if (onePasswordDraft.account.trim().length === 0) {
+      planBlockerMessage = sectionCaption(
+        props.locale,
+        "Select a 1Password account first.",
+        "请先选择 1Password 账号。",
+      );
+    } else if (onePasswordDraft.vault.trim().length === 0) {
+      planBlockerMessage = sectionCaption(
+        props.locale,
+        "Select a vault before importing.",
+        "请先选择 vault 再导入。",
+      );
+    } else if (selectedOnePasswordItems.length === 0) {
+      planBlockerMessage = sectionCaption(
+        props.locale,
+        "Select at least one item before importing.",
+        "请至少选择一个条目再导入。",
+      );
+    } else if (
+      isOnePasswordMultiResourceMode &&
+      !areOnePasswordSelectedFieldsReady
+    ) {
+      planBlockerMessage = sectionCaption(
+        props.locale,
+        "Waiting for 1Password fields to finish loading for the selected items.",
+        "正在等待所选 1Password 条目的字段加载完成。",
+      );
+    } else if (
+      !isOnePasswordMultiResourceMode &&
+      selectedOnePasswordFields.length === 0 &&
+      onePasswordDraft.field.trim().length === 0
+    ) {
+      planBlockerMessage = sectionCaption(
+        props.locale,
+        "Select a field, or enter a fallback field selector before importing.",
+        "导入前请先选择字段，或者手动填写一个兜底字段选择器。",
+      );
+    }
+  } else if (providerKind === "bitwarden_cli") {
+    if (bitwardenDraft.account.trim().length === 0) {
+      planBlockerMessage = sectionCaption(
+        props.locale,
+        "Select a Bitwarden account first.",
+        "请先选择 Bitwarden 账号。",
+      );
+    } else if (selectedBitwardenItems.length === 0) {
+      planBlockerMessage = sectionCaption(
+        props.locale,
+        "Select at least one item before importing.",
+        "请至少选择一个条目再导入。",
+      );
+    } else if (
+      isBitwardenMultiResourceMode &&
+      !areBitwardenSelectedFieldsReady
+    ) {
+      planBlockerMessage = sectionCaption(
+        props.locale,
+        "Waiting for Bitwarden fields to finish loading for the selected items.",
+        "正在等待所选 Bitwarden 条目的字段加载完成。",
+      );
+    } else if (
+      !isBitwardenMultiResourceMode &&
+      selectedBitwardenFields.length === 0 &&
+      bitwardenDraft.field.trim().length === 0
+    ) {
+      planBlockerMessage = sectionCaption(
+        props.locale,
+        "Select a field, or enter a fallback field selector before importing.",
+        "导入前请先选择字段，或者手动填写一个兜底字段选择器。",
+      );
+    }
+  } else if (dotenvDraft.filePath.trim().length === 0) {
+    planBlockerMessage = sectionCaption(
+      props.locale,
+      "Choose a dotenv file before importing.",
+      "导入前请先选择 dotenv 文件。",
+    );
+  } else if (selectedDotenvKeyOptions.length === 0) {
+    planBlockerMessage = sectionCaption(
+      props.locale,
+      "Select at least one dotenv key before importing.",
+      "导入前请至少选择一个 dotenv key。",
+    );
+  }
+
   if (
+    !planBlockerMessage &&
     resourceTemplateMode === "custom" &&
     commonDraft.resource.trim().length === 0 &&
     resourceTemplate.trim().length === 0
@@ -996,13 +1229,13 @@ export function PasswordManagementView(
       "Custom resource templates cannot be empty.",
       "自定义资源模板不能为空。",
     );
-  } else if (metadataDraft.invalidLines.length > 0) {
+  } else if (!planBlockerMessage && metadataDraft.invalidLines.length > 0) {
     planBlockerMessage = sectionCaption(
       props.locale,
       `Metadata must use KEY=VALUE lines: ${metadataDraft.invalidLines.join(", ")}`,
       `元信息必须使用 KEY=VALUE 格式：${metadataDraft.invalidLines.join("、")}`,
     );
-  } else if (providerKind === "1password_cli") {
+  } else if (!planBlockerMessage && providerKind === "1password_cli") {
     if (
       onePasswordDraft.account.trim().length > 0 &&
       onePasswordDraft.vault.trim().length > 0 &&
@@ -1070,7 +1303,7 @@ export function PasswordManagementView(
         );
       }
     }
-  } else if (providerKind === "bitwarden_cli") {
+  } else if (!planBlockerMessage && providerKind === "bitwarden_cli") {
     if (
       bitwardenDraft.account.trim().length > 0 &&
       selectedBitwardenItems.length > 0
@@ -1136,6 +1369,7 @@ export function PasswordManagementView(
       }
     }
   } else if (
+    !planBlockerMessage &&
     dotenvDraft.filePath.trim().length > 0 &&
     selectedDotenvKeyOptions.length > 0
   ) {
@@ -1288,6 +1522,101 @@ export function PasswordManagementView(
     });
   }
 
+  function saveCurrentResourceTemplate(): void {
+    const trimmedTemplate = resourceTemplate.trim();
+    const trimmedName = resourceTemplateName.trim();
+
+    if (trimmedTemplate.length === 0 || trimmedName.length === 0) {
+      setNoticeMessage(null);
+      setSubmitErrorMessage(
+        sectionCaption(
+          props.locale,
+          "Saved templates require both a name and a custom template value.",
+          "保存模板时必须同时填写名称和自定义模板内容。",
+        ),
+      );
+      return;
+    }
+
+    const now = new Date().toISOString();
+    const nextTemplates = [...savedResourceTemplates];
+    const existingIndex = nextTemplates.findIndex(
+      (template) =>
+        template.providerKind === providerKind && template.name === trimmedName,
+    );
+
+    const nextTemplate: SavedResourceTemplate = {
+      id:
+        existingIndex >= 0
+          ? nextTemplates[existingIndex].id
+          : `${providerKind}:${trimmedName}:${now}`,
+      name: trimmedName,
+      providerKind,
+      template: trimmedTemplate,
+      createdAt:
+        existingIndex >= 0 ? nextTemplates[existingIndex].createdAt : now,
+      updatedAt: now,
+    };
+
+    if (existingIndex >= 0) {
+      nextTemplates[existingIndex] = nextTemplate;
+    } else {
+      nextTemplates.push(nextTemplate);
+    }
+
+    persistSavedResourceTemplates(nextTemplates);
+    setSavedResourceTemplates(nextTemplates);
+    setSelectedSavedResourceTemplateId(nextTemplate.id);
+    setSubmitErrorMessage(null);
+    setNoticeMessage(
+      sectionCaption(
+        props.locale,
+        `Saved template ${trimmedName}`,
+        `已保存模板 ${trimmedName}`,
+      ),
+    );
+  }
+
+  function applySavedResourceTemplate(templateId: string): void {
+    const nextTemplate =
+      savedResourceTemplates.find((template) => template.id === templateId) ??
+      null;
+    if (!nextTemplate) {
+      return;
+    }
+
+    setResourceTemplateMode("custom");
+    setResourceTemplate(nextTemplate.template);
+    setResourceTemplateName(nextTemplate.name);
+    setSelectedSavedResourceTemplateId(nextTemplate.id);
+    setSubmitErrorMessage(null);
+    setNoticeMessage(
+      sectionCaption(
+        props.locale,
+        `Loaded template ${nextTemplate.name}`,
+        `已加载模板 ${nextTemplate.name}`,
+      ),
+    );
+  }
+
+  function deleteSavedResourceTemplate(templateId: string): void {
+    const nextTemplates = savedResourceTemplates.filter(
+      (template) => template.id !== templateId,
+    );
+    persistSavedResourceTemplates(nextTemplates);
+    setSavedResourceTemplates(nextTemplates);
+    if (selectedSavedResourceTemplateId === templateId) {
+      setSelectedSavedResourceTemplateId(null);
+    }
+    setNoticeMessage(
+      sectionCaption(
+        props.locale,
+        "Deleted saved template",
+        "已删除保存的模板",
+      ),
+    );
+  }
+
   async function loadImportedCatalog(options?: {
     silent?: boolean;
   }): Promise<void> {
@@ -1297,8 +1626,8 @@ export function PasswordManagementView(
     setCatalogErrorMessage(null);
 
     try {
-      const nextCatalog = await invoke<ImportedSecretCatalog>(
-        "list_imported_secret_sources",
+      const nextCatalog = await invoke<LocalSecretCatalog>(
+        "list_local_secret_catalog_command",
       );
       setImportedCatalog(nextCatalog);
     } catch (error) {
@@ -1313,9 +1642,7 @@ export function PasswordManagementView(
   }
 
   function handleBrowseError(error: unknown): void {
-    setBrowseErrorMessage(
-      error instanceof Error ? error.message : String(error),
-    );
+    setBrowseErrorMessage(formatUserFacingImportError(props.locale, error));
   }
 
   async function saveImportedSecret(
@@ -1345,27 +1672,51 @@ export function PasswordManagementView(
     }
   }
 
+  async function saveLocalSecret(
+    entry: LocalSecretLiteralUpsert,
+  ): Promise<void> {
+    setCatalogErrorMessage(null);
+
+    try {
+      await invoke("upsert_local_secret_literal_command", {
+        entry,
+      });
+      setCatalogNoticeMessage(
+        sectionCaption(
+          props.locale,
+          `Saved local secret ${entry.resource}`,
+          `已保存本地密钥 ${entry.resource}`,
+        ),
+      );
+      await loadImportedCatalog({ silent: true });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      setCatalogErrorMessage(message);
+      throw error;
+    }
+  }
+
   async function deleteImportedSecret(resource: string): Promise<void> {
     setCatalogErrorMessage(null);
 
     try {
-      const deleted = await invoke<boolean>("delete_imported_secret_source", {
+      const deleted = await invoke<boolean>("delete_local_secret_entry_command", {
         resource,
       });
       if (!deleted) {
         throw new Error(
           sectionCaption(
             props.locale,
-            `Imported resource was not found: ${resource}`,
-            `未找到导入资源：${resource}`,
+            `Secret entry was not found: ${resource}`,
+            `未找到密钥条目：${resource}`,
           ),
         );
       }
       setCatalogNoticeMessage(
         sectionCaption(
           props.locale,
-          `Removed import ${resource}`,
-          `已删除导入 ${resource}`,
+          `Deleted ${resource}`,
+          `已删除 ${resource}`,
         ),
       );
       await loadImportedCatalog({ silent: true });
@@ -1380,6 +1731,13 @@ export function PasswordManagementView(
     setIsSubmitting(true);
     setSubmitErrorMessage(null);
     setNoticeMessage(null);
+
+    console.info("[password-import] submit start", {
+      providerKind,
+      plannedSpecCount: plannedSpecs.length,
+      resourceTemplate: sharedResourceTemplate,
+      resources: plannedSpecs.map((spec) => spec.resource || "<generated>"),
+    });
 
     try {
       const nextBatchReceipt = await invoke<ImportedSecretBatchReceipt>(
@@ -1403,10 +1761,17 @@ export function PasswordManagementView(
               `已导入 ${nextReceipts.length} 个资源`,
             ),
       );
+      console.info("[password-import] submit success", {
+        providerKind,
+        importedCount: nextReceipts.length,
+        resources: nextReceipts.map((entry) => entry.reference.resource),
+      });
     } catch (error) {
-      setSubmitErrorMessage(
-        error instanceof Error ? error.message : String(error),
-      );
+      console.error("[password-import] submit failed", {
+        providerKind,
+        error,
+      });
+      setSubmitErrorMessage(formatUserFacingImportError(props.locale, error));
     } finally {
       setIsSubmitting(false);
     }
@@ -2219,6 +2584,18 @@ export function PasswordManagementView(
         </section>
       ) : null}
 
+      <ImportedSecretCatalogPanel
+        catalog={importedCatalog}
+        errorMessage={catalogErrorMessage}
+        isLoading={isCatalogLoading}
+        locale={props.locale}
+        noticeMessage={catalogNoticeMessage}
+        onDelete={deleteImportedSecret}
+        onReload={loadImportedCatalog}
+        onSaveImported={saveImportedSecret}
+        onSaveLiteral={saveLocalSecret}
+      />
+
       <div className="password-layout" data-testid="password-management-layout">
         <section
           className="detail-section"
@@ -2449,6 +2826,7 @@ export function PasswordManagementView(
               data-testid="password-template-mode-default"
               onClick={() => {
                 setResourceTemplateMode("default");
+                setSelectedSavedResourceTemplateId(null);
               }}
               type="button"
             >
@@ -2467,6 +2845,7 @@ export function PasswordManagementView(
               data-testid="password-template-mode-custom"
               onClick={() => {
                 setResourceTemplateMode("custom");
+                setSelectedSavedResourceTemplateId(null);
               }}
               type="button"
             >
@@ -2481,23 +2860,93 @@ export function PasswordManagementView(
                 )}
               </p>
             </button>
+            {visibleSavedResourceTemplates.map((template) => (
+              <div
+                className={`provider-option provider-option-card ${
+                  selectedSavedResourceTemplateId === template.id
+                    ? "active"
+                    : ""
+                }`}
+                data-testid="password-saved-template-item"
+                key={template.id}
+              >
+                <div className="saved-template-copy">
+                  <strong>{template.name}</strong>
+                  <p>{template.template}</p>
+                </div>
+                <div className="provider-option-actions">
+                  <button
+                    className="ghost"
+                    data-testid="password-saved-template-apply"
+                    onClick={() => {
+                      applySavedResourceTemplate(template.id);
+                    }}
+                    type="button"
+                  >
+                    {sectionCaption(props.locale, "Apply", "应用")}
+                  </button>
+                  <button
+                    className="ghost"
+                    data-testid="password-saved-template-delete"
+                    onClick={() => {
+                      deleteSavedResourceTemplate(template.id);
+                    }}
+                    type="button"
+                  >
+                    {sectionCaption(props.locale, "Delete", "删除")}
+                  </button>
+                </div>
+              </div>
+            ))}
           </div>
           {resourceTemplateMode === "custom" ? (
-            <LocatorField
-              dataTestId="password-field-resource-template"
-              hint={sectionCaption(
-                props.locale,
-                `Supported placeholders: ${availableTemplateTokens(providerKind).join(", ")}`,
-                `支持的占位符：${availableTemplateTokens(providerKind).join("、")}`,
-              )}
-              label={sectionCaption(props.locale, "Template", "模板")}
-              onChange={setResourceTemplate}
-              optionalLabel={t(props.locale, "optional")}
-              value={resourceTemplate}
-            />
+            <>
+              <LocatorField
+                dataTestId="password-field-resource-template"
+                hint={sectionCaption(
+                  props.locale,
+                  `Supported placeholders: ${availableTemplateTokens(providerKind).join(", ")}`,
+                  `支持的占位符：${availableTemplateTokens(providerKind).join("、")}`,
+                )}
+                label={sectionCaption(props.locale, "Template", "模板")}
+                onChange={setResourceTemplate}
+                optionalLabel={t(props.locale, "optional")}
+                value={resourceTemplate}
+              />
+              <div className="template-save-row">
+                <LocatorField
+                  dataTestId="password-field-resource-template-name"
+                  hint={sectionCaption(
+                    props.locale,
+                    "Save reusable templates under a short name for this provider.",
+                    "给当前 provider 的可复用模板保存一个简短名称。",
+                  )}
+                  label={sectionCaption(
+                    props.locale,
+                    "Template Name",
+                    "模板名称",
+                  )}
+                  onChange={setResourceTemplateName}
+                  optionalLabel={t(props.locale, "optional")}
+                  value={resourceTemplateName}
+                />
+                <div className="password-actions">
+                  <button
+                    className="ghost"
+                    data-testid="password-template-save"
+                    onClick={() => {
+                      saveCurrentResourceTemplate();
+                    }}
+                    type="button"
+                  >
+                    {sectionCaption(props.locale, "Save Template", "保存模板")}
+                  </button>
+                </div>
+              </div>
+            </>
           ) : null}
           <div
-            className="detail-section detail-section-low"
+            className="detail-section detail-section-low template-preview-panel"
             data-testid="password-template-preview"
           >
             <div className="detail-section-header">
@@ -3136,16 +3585,6 @@ export function PasswordManagementView(
         </section>
       ) : null}
 
-      <ImportedSecretCatalogPanel
-        catalog={importedCatalog}
-        errorMessage={catalogErrorMessage}
-        isLoading={isCatalogLoading}
-        locale={props.locale}
-        noticeMessage={catalogNoticeMessage}
-        onDelete={deleteImportedSecret}
-        onReload={loadImportedCatalog}
-        onSave={saveImportedSecret}
-      />
     </section>
   );
 }

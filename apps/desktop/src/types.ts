@@ -219,12 +219,28 @@ export type ImportedSecretCatalog = {
   imports: ImportedSecretReference[];
 };
 
+export type LocalSecretLiteralEntry = {
+  resource: string;
+  value: string;
+};
+
+export type LocalSecretCatalog = {
+  catalog_path: string;
+  literals: LocalSecretLiteralEntry[];
+  imports: ImportedSecretReference[];
+};
+
 export type ImportedSecretReferenceUpdate = {
   resource: string;
   display_name: string | null;
   description: string | null;
   tags: string[];
   metadata: Record<string, string>;
+};
+
+export type LocalSecretLiteralUpsert = {
+  resource: string;
+  value: string;
 };
 
 export type ImportPickerOption = {

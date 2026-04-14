@@ -46,11 +46,13 @@ pub use template::{
     REQUEST_TEMPLATE_ID, REQUEST_TEMPLATE_VERSION,
 };
 pub use value_resolver::{
-    default_value_resolver, delete_imported_secret_reference, import_secret_reference,
-    import_secret_references, list_imported_secret_references, local_secret_catalog_path,
-    update_imported_secret_reference, ImportedSecretBatchReceipt, ImportedSecretCatalog,
+    default_value_resolver, delete_imported_secret_reference, delete_local_secret_entry,
+    import_secret_reference, import_secret_references, list_imported_secret_references,
+    list_local_secret_catalog, local_secret_catalog_path, update_imported_secret_reference,
+    upsert_local_secret_literal, ImportedSecretBatchReceipt, ImportedSecretCatalog,
     ImportedSecretReceipt, ImportedSecretReference, ImportedSecretReferenceUpdate,
-    LocalSecretCatalogResolver, SecretImportBatchSpec, SecretImportError, SecretImportSpec,
+    LocalSecretCatalog, LocalSecretCatalogResolver, LocalSecretLiteralEntry,
+    LocalSecretLiteralUpsert, SecretImportBatchSpec, SecretImportError, SecretImportSpec,
     SecretSourceLocator, ValueResolver, ValueResolverError, BITWARDEN_CLI_PROVIDER_KIND,
     DOTENV_FILE_PROVIDER_KIND, ONEPASSWORD_CLI_PROVIDER_KIND,
 };

@@ -3756,7 +3756,7 @@ checksum = "b4596b6d070b27117e987119b4dac604f3c58cfb0b191112e24771b2faeac1a6"
 
 [[package]]
 name = "plankton"
-version = "0.1.14"
+version = "0.1.15"
 dependencies = [
  "anyhow",
  "chrono",
@@ -3773,7 +3773,7 @@ dependencies = [
 
 [[package]]
 name = "plankton-core"
-version = "0.1.14"
+version = "0.1.15"
 dependencies = [
  "agent-client-protocol",
  "async-openai",
@@ -3796,13 +3796,14 @@ dependencies = [
  "tokio",
  "tokio-util",
  "toml 0.8.2",
+ "tracing",
  "uuid",
  "wiremock",
 ]
 
 [[package]]
 name = "plankton-desktop"
-version = "0.1.14"
+version = "0.1.15"
 dependencies = [
  "anyhow",
  "dotenvy",
@@ -3825,7 +3826,7 @@ dependencies = [
 
 [[package]]
 name = "plankton-store"
-version = "0.1.14"
+version = "0.1.15"
 dependencies = [
  "chrono",
  "plankton-core",

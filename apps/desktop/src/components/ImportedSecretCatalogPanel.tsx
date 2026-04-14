@@ -1,46 +1,75 @@
 import { useEffect, useMemo, useState, type JSX } from "react";
 
 import { formatTimestamp } from "../formatters";
-import { t, translateCode, type Locale } from "../i18n";
+import { translateCode, type Locale } from "../i18n";
 import type {
-  ImportedSecretCatalog,
   ImportedSecretReference,
   ImportedSecretReferenceUpdate,
+  LocalSecretCatalog,
+  LocalSecretLiteralEntry,
+  LocalSecretLiteralUpsert,
 } from "../types";
 
 type ImportedSecretCatalogPanelProps = {
-  catalog: ImportedSecretCatalog | null;
+  catalog: LocalSecretCatalog | null;
   errorMessage: string | null;
   isLoading: boolean;
   locale: Locale;
   noticeMessage: string | null;
   onDelete: (resource: string) => Promise<void>;
   onReload: (options?: { silent?: boolean }) => Promise<void>;
-  onSave: (update: ImportedSecretReferenceUpdate) => Promise<void>;
+  onSaveImported: (update: ImportedSecretReferenceUpdate) => Promise<void>;
+  onSaveLiteral: (entry: LocalSecretLiteralUpsert) => Promise<void>;
 };
 
-type ImportedSecretTreeNode = {
+type CatalogLeafEntry =
+  | {
+      kind: "literal";
+      resource: string;
+      literal: LocalSecretLiteralEntry;
+    }
+  | {
+      kind: "imported";
+      resource: string;
+      reference: ImportedSecretReference;
+    };
+
+type CatalogTreeNode = {
   id: string;
   label: string;
   resource: string | null;
-  reference: ImportedSecretReference | null;
+  entry: CatalogLeafEntry | null;
   leafCount: number;
-  children: ImportedSecretTreeNode[];
+  children: CatalogTreeNode[];
 };
 
-type EditorDraft = {
+type ImportedEditorDraft = {
   displayName: string;
   description: string;
   tags: string;
   metadata: string;
 };
 
-const EMPTY_EDITOR_DRAFT: EditorDraft = {
+type LiteralEditorDraft = {
+  resource: string;
+  value: string;
+};
+
+const EMPTY_IMPORTED_DRAFT: ImportedEditorDraft = {
   displayName: "",
   description: "",
   tags: "",
   metadata: "",
 };
+
+const EMPTY_LITERAL_DRAFT: LiteralEditorDraft = {
+  resource: "",
+  value: "",
+};
+
+function caption(locale: Locale, english: string, chinese: string): string {
+  return locale === "zh-CN" ? chinese : english;
+}
 
 function parseTags(value: string): string[] {
   return value
@@ -93,31 +122,50 @@ function formatMetadataDraft(
     .join("\n");
 }
 
-function buildEditorDraft(reference: ImportedSecretReference): EditorDraft {
+function buildImportedEditorDraft(
+  reference: ImportedSecretReference,
+): ImportedEditorDraft {
   return {
     displayName: reference.display_name,
     description: reference.description ?? "",
-    tags: reference.tags.join(", "),
+    tags: (reference.tags ?? []).join(", "),
     metadata: formatMetadataDraft(reference.metadata),
   };
 }
 
-function buildImportedSecretTree(
-  imports: ImportedSecretReference[],
-): ImportedSecretTreeNode[] {
+function buildCatalogEntries(catalog: LocalSecretCatalog | null): CatalogLeafEntry[] {
+  if (!catalog) {
+    return [];
+  }
+
+  return [
+    ...catalog.literals.map((literal) => ({
+      kind: "literal" as const,
+      resource: literal.resource,
+      literal,
+    })),
+    ...catalog.imports.map((reference) => ({
+      kind: "imported" as const,
+      resource: reference.resource,
+      reference,
+    })),
+  ];
+}
+
+function buildCatalogTree(entries: CatalogLeafEntry[]): CatalogTreeNode[] {
   type MutableNode = {
     id: string;
     label: string;
     resource: string | null;
-    reference: ImportedSecretReference | null;
+    entry: CatalogLeafEntry | null;
     leafCount: number;
     children: Map<string, MutableNode>;
   };
 
   const root = new Map<string, MutableNode>();
 
-  for (const reference of imports) {
-    const segments = reference.resource.split("/").filter(Boolean);
+  for (const entry of entries) {
+    const segments = entry.resource.split("/").filter(Boolean);
     let current = root;
     let currentPath = "";
 
@@ -130,7 +178,7 @@ function buildImportedSecretTree(
           id: currentPath,
           label: segment,
           resource: null,
-          reference: null,
+          entry: null,
           leafCount: 0,
           children: new Map(),
         };
@@ -139,24 +187,22 @@ function buildImportedSecretTree(
 
       node.leafCount += 1;
       if (index === segments.length - 1) {
-        node.resource = reference.resource;
-        node.reference = reference;
+        node.resource = entry.resource;
+        node.entry = entry;
       } else {
         current = node.children;
       }
     }
   }
 
-  function materialize(
-    nodes: Map<string, MutableNode>,
-  ): ImportedSecretTreeNode[] {
+  function materialize(nodes: Map<string, MutableNode>): CatalogTreeNode[] {
     return Array.from(nodes.values())
       .sort((left, right) => left.label.localeCompare(right.label))
       .map((node) => ({
         id: node.id,
         label: node.label,
-        resource: node.reference?.resource ?? node.resource,
-        reference: node.reference,
+        resource: node.resource,
+        entry: node.entry,
         leafCount: node.leafCount,
         children: materialize(node.children),
       }));
@@ -165,7 +211,7 @@ function buildImportedSecretTree(
   return materialize(root);
 }
 
-function getSearchText(reference: ImportedSecretReference): string {
+function importedSearchText(reference: ImportedSecretReference): string {
   const parts = [
     reference.resource,
     reference.display_name,
@@ -211,78 +257,87 @@ function getSearchText(reference: ImportedSecretReference): string {
   return parts.join("\n").toLowerCase();
 }
 
-function matchesSearch(
-  reference: ImportedSecretReference,
-  query: string,
-): boolean {
+function matchesSearch(entry: CatalogLeafEntry, query: string): boolean {
   const normalizedQuery = query.trim().toLowerCase();
   if (normalizedQuery.length === 0) {
     return true;
   }
 
-  return getSearchText(reference).includes(normalizedQuery);
+  if (entry.kind === "literal") {
+    return entry.resource.toLowerCase().includes(normalizedQuery);
+  }
+
+  return importedSearchText(entry.reference).includes(normalizedQuery);
 }
 
-function getLocatorEntries(
+function importedLocatorEntries(
   locale: Locale,
   reference: ImportedSecretReference,
 ): Array<{ label: string; value: string }> {
   if (reference.provider_kind === "1password_cli") {
     return [
-      { label: t(locale, "account"), value: reference.account },
-      { label: t(locale, "vault"), value: reference.vault },
-      { label: t(locale, "item"), value: reference.item },
-      { label: t(locale, "field"), value: reference.field },
+      { label: caption(locale, "Account", "账号"), value: reference.account },
+      { label: caption(locale, "Vault", "保险库"), value: reference.vault },
+      { label: caption(locale, "Item", "条目"), value: reference.item },
+      { label: caption(locale, "Field", "字段"), value: reference.field },
       ...(reference.account_id
-        ? [{ label: t(locale, "accountId"), value: reference.account_id }]
+        ? [{ label: caption(locale, "Account ID", "账号 ID"), value: reference.account_id }]
         : []),
       ...(reference.vault_id
-        ? [{ label: t(locale, "vaultId"), value: reference.vault_id }]
+        ? [{ label: caption(locale, "Vault ID", "保险库 ID"), value: reference.vault_id }]
         : []),
       ...(reference.item_id
-        ? [{ label: t(locale, "itemId"), value: reference.item_id }]
+        ? [{ label: caption(locale, "Item ID", "条目 ID"), value: reference.item_id }]
         : []),
       ...(reference.field_id
-        ? [{ label: t(locale, "fieldId"), value: reference.field_id }]
+        ? [{ label: caption(locale, "Field ID", "字段 ID"), value: reference.field_id }]
         : []),
     ];
   }
 
   if (reference.provider_kind === "bitwarden_cli") {
     return [
-      { label: t(locale, "account"), value: reference.account },
+      { label: caption(locale, "Account", "账号"), value: reference.account },
       ...(reference.organization
-        ? [{ label: t(locale, "organization"), value: reference.organization }]
+        ? [{ label: caption(locale, "Organization", "组织"), value: reference.organization }]
         : []),
       ...(reference.collection
-        ? [{ label: t(locale, "collection"), value: reference.collection }]
+        ? [{ label: caption(locale, "Collection", "集合"), value: reference.collection }]
         : []),
       ...(reference.folder
-        ? [{ label: t(locale, "folder"), value: reference.folder }]
+        ? [{ label: caption(locale, "Folder", "文件夹"), value: reference.folder }]
         : []),
-      { label: t(locale, "item"), value: reference.item },
-      { label: t(locale, "field"), value: reference.field },
+      { label: caption(locale, "Item", "条目"), value: reference.item },
+      { label: caption(locale, "Field", "字段"), value: reference.field },
       ...(reference.item_id
-        ? [{ label: t(locale, "itemId"), value: reference.item_id }]
+        ? [{ label: caption(locale, "Item ID", "条目 ID"), value: reference.item_id }]
         : []),
     ];
   }
 
   return [
-    { label: t(locale, "filePath"), value: reference.file_path },
+    { label: caption(locale, "File Path", "文件路径"), value: reference.file_path },
     ...(reference.namespace
-      ? [{ label: t(locale, "namespace"), value: reference.namespace }]
+      ? [{ label: caption(locale, "Namespace", "命名空间"), value: reference.namespace }]
       : []),
     ...(reference.prefix
-      ? [{ label: t(locale, "prefix"), value: reference.prefix }]
+      ? [{ label: caption(locale, "Prefix", "前缀"), value: reference.prefix }]
       : []),
-    { label: t(locale, "key"), value: reference.key },
+    { label: caption(locale, "Key", "键名"), value: reference.key },
   ];
 }
 
-function hasDraftChanges(
+function importedLeafSubtitle(reference: ImportedSecretReference): string {
+  return reference.display_name;
+}
+
+function importedTagCount(reference: ImportedSecretReference): number {
+  return reference.tags?.length ?? 0;
+}
+
+function importedDraftChanged(
   reference: ImportedSecretReference,
-  draft: EditorDraft,
+  draft: ImportedEditorDraft,
   metadata: Record<string, string>,
 ): boolean {
   const normalizedTags = parseTags(draft.tags);
@@ -292,32 +347,44 @@ function hasDraftChanges(
   if (reference.display_name !== draft.displayName.trim()) {
     return true;
   }
-
   if ((reference.description ?? "") !== draft.description.trim()) {
     return true;
   }
-
   if (normalizedTags.join("\n") !== currentTags.join("\n")) {
     return true;
   }
 
   const leftMetadata = JSON.stringify(
-    Object.entries(metadata).sort(([left], [right]) =>
-      left.localeCompare(right),
-    ),
+    Object.entries(metadata).sort(([left], [right]) => left.localeCompare(right)),
   );
   const rightMetadata = JSON.stringify(
-    Object.entries(currentMetadata).sort(([left], [right]) =>
-      left.localeCompare(right),
-    ),
+    Object.entries(currentMetadata).sort(([left], [right]) => left.localeCompare(right)),
   );
-
   return leftMetadata !== rightMetadata;
+}
+
+function literalEditModeDescription(
+  locale: Locale,
+  selectedEntry: CatalogLeafEntry | null,
+): string {
+  if (selectedEntry?.kind === "imported") {
+    return caption(
+      locale,
+      "Saving a local value for this resource will replace the imported locator entry. Use this when you want to edit the concrete secret value locally.",
+      "为这个资源保存本地值后，会替换掉原来的导入 locator。需要直接编辑具体密钥值时，请使用这个入口。",
+    );
+  }
+
+  return caption(
+    locale,
+    "Manual secrets store a local value directly in the secret catalog.",
+    "手工密钥会把值直接保存在本地 secret catalog 中。",
+  );
 }
 
 function TreeBranch(props: {
   locale: Locale;
-  nodes: ImportedSecretTreeNode[];
+  nodes: CatalogTreeNode[];
   selectedResource: string | null;
   onSelect: (resource: string) => void;
 }): JSX.Element {
@@ -325,29 +392,37 @@ function TreeBranch(props: {
     <ol className="imported-tree-list">
       {props.nodes.map((node) => (
         <li className="imported-tree-node" key={node.id}>
-          {node.reference ? (
+          {node.entry ? (
             <button
               className={`queue-item imported-tree-leaf ${
-                props.selectedResource === node.reference.resource
-                  ? "active"
-                  : ""
+                props.selectedResource === node.entry.resource ? "active" : ""
               }`}
-              data-resource={node.reference.resource}
+              data-resource={node.entry.resource}
               data-testid="imported-secret-tree-leaf"
               onClick={() => {
-                props.onSelect(node.reference!.resource);
+                props.onSelect(node.entry!.resource);
               }}
               type="button"
             >
               <div className="queue-item-header">
                 <strong>{node.label}</strong>
                 <span>
-                  {translateCode(props.locale, node.reference.provider_kind)}
+                  {node.entry.kind === "literal"
+                    ? caption(props.locale, "Manual", "手工")
+                    : translateCode(props.locale, node.entry.reference.provider_kind)}
                 </span>
               </div>
               <div className="queue-item-meta">
-                <span>{node.reference.display_name}</span>
-                <span>{node.reference.tags.length} tag(s)</span>
+                <span>
+                  {node.entry.kind === "literal"
+                    ? caption(props.locale, "Local secret value", "本地密钥值")
+                    : importedLeafSubtitle(node.entry.reference)}
+                </span>
+                <span>
+                  {node.entry.kind === "literal"
+                    ? ""
+                    : `${importedTagCount(node.entry.reference)} ${caption(props.locale, "tag(s)", "个标签")}`}
+                </span>
               </div>
             </button>
           ) : (
@@ -377,56 +452,107 @@ export function ImportedSecretCatalogPanel(
 ): JSX.Element {
   const [searchQuery, setSearchQuery] = useState("");
   const [selectedResource, setSelectedResource] = useState<string | null>(null);
-  const [draft, setDraft] = useState<EditorDraft>(EMPTY_EDITOR_DRAFT);
+  const [isCreatingLiteral, setIsCreatingLiteral] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
   const [isDeleting, setIsDeleting] = useState(false);
+  const [isLocatorOpen, setIsLocatorOpen] = useState(false);
+  const [importedDraft, setImportedDraft] =
+    useState<ImportedEditorDraft>(EMPTY_IMPORTED_DRAFT);
+  const [literalDraft, setLiteralDraft] =
+    useState<LiteralEditorDraft>(EMPTY_LITERAL_DRAFT);
 
-  const imports = props.catalog?.imports ?? [];
-  const filteredImports = useMemo(
-    () => imports.filter((reference) => matchesSearch(reference, searchQuery)),
-    [imports, searchQuery],
+  const entries = useMemo(
+    () => buildCatalogEntries(props.catalog),
+    [props.catalog],
+  );
+  const filteredEntries = useMemo(
+    () => entries.filter((entry) => matchesSearch(entry, searchQuery)),
+    [entries, searchQuery],
   );
   const tree = useMemo(
-    () => buildImportedSecretTree(filteredImports),
-    [filteredImports],
+    () => buildCatalogTree(filteredEntries),
+    [filteredEntries],
   );
-  const selectedReference =
-    imports.find((reference) => reference.resource === selectedResource) ??
-    null;
-  const metadataDraft = parseMetadataDraft(draft.metadata);
+  const selectedEntry =
+    entries.find((entry) => entry.resource === selectedResource) ?? null;
+  const metadataDraft = parseMetadataDraft(importedDraft.metadata);
 
   useEffect(() => {
+    if (isCreatingLiteral) {
+      return;
+    }
+
     if (
       selectedResource &&
-      imports.some((reference) => reference.resource === selectedResource)
+      entries.some((entry) => entry.resource === selectedResource)
     ) {
       return;
     }
 
-    setSelectedResource(imports[0]?.resource ?? null);
-  }, [imports, selectedResource]);
+    setSelectedResource(entries[0]?.resource ?? null);
+  }, [entries, isCreatingLiteral, selectedResource]);
 
   useEffect(() => {
-    if (!selectedReference) {
-      setDraft(EMPTY_EDITOR_DRAFT);
+    setIsLocatorOpen(false);
+  }, [selectedResource, isCreatingLiteral]);
+
+  useEffect(() => {
+    if (isCreatingLiteral) {
+      setLiteralDraft(EMPTY_LITERAL_DRAFT);
       return;
     }
 
-    setDraft(buildEditorDraft(selectedReference));
-  }, [selectedReference]);
+    if (!selectedEntry) {
+      setImportedDraft(EMPTY_IMPORTED_DRAFT);
+      setLiteralDraft(EMPTY_LITERAL_DRAFT);
+      return;
+    }
 
-  async function handleSave(): Promise<void> {
-    if (!selectedReference || metadataDraft.invalidLines.length > 0) {
+    if (selectedEntry.kind === "literal") {
+      setLiteralDraft({
+        resource: selectedEntry.literal.resource,
+        value: selectedEntry.literal.value,
+      });
+      return;
+    }
+
+    setImportedDraft(buildImportedEditorDraft(selectedEntry.reference));
+  }, [isCreatingLiteral, selectedEntry]);
+
+  function selectEntry(resource: string): void {
+    setIsCreatingLiteral(false);
+    setSelectedResource(resource);
+  }
+
+  function startCreatingLiteral(resource?: string): void {
+    setIsCreatingLiteral(true);
+    setSelectedResource(resource ?? null);
+    setLiteralDraft({
+      resource: resource ?? "",
+      value: "",
+    });
+  }
+
+  function cancelLiteralEdit(): void {
+    setIsCreatingLiteral(false);
+  }
+
+  async function handleSaveImported(): Promise<void> {
+    if (
+      !selectedEntry ||
+      selectedEntry.kind !== "imported" ||
+      metadataDraft.invalidLines.length > 0
+    ) {
       return;
     }
 
     setIsSaving(true);
     try {
-      await props.onSave({
-        resource: selectedReference.resource,
-        display_name: draft.displayName.trim(),
-        description: draft.description.trim(),
-        tags: parseTags(draft.tags),
+      await props.onSaveImported({
+        resource: selectedEntry.reference.resource,
+        display_name: importedDraft.displayName.trim(),
+        description: importedDraft.description.trim(),
+        tags: parseTags(importedDraft.tags),
         metadata: metadataDraft.metadata,
       });
     } finally {
@@ -434,15 +560,37 @@ export function ImportedSecretCatalogPanel(
     }
   }
 
+  async function handleSaveLiteral(): Promise<void> {
+    const resource = literalDraft.resource.trim();
+    if (resource.length === 0 || literalDraft.value.length === 0) {
+      return;
+    }
+
+    setIsSaving(true);
+    try {
+      await props.onSaveLiteral({
+        resource,
+        value: literalDraft.value,
+      });
+      setIsCreatingLiteral(false);
+      setSelectedResource(resource);
+    } finally {
+      setIsSaving(false);
+    }
+  }
+
   async function handleDelete(): Promise<void> {
-    if (!selectedReference) {
+    const resource = isCreatingLiteral ? literalDraft.resource.trim() : selectedEntry?.resource;
+    if (!resource) {
       return;
     }
 
     const confirmed = window.confirm(
-      t(props.locale, "deleteImportConfirm", {
-        resource: selectedReference.resource,
-      }),
+      caption(
+        props.locale,
+        `Delete ${resource}?`,
+        `确认删除 ${resource}？`,
+      ),
     );
     if (!confirmed) {
       return;
@@ -450,18 +598,41 @@ export function ImportedSecretCatalogPanel(
 
     setIsDeleting(true);
     try {
-      await props.onDelete(selectedReference.resource);
+      await props.onDelete(resource);
+      if (selectedResource === resource) {
+        setSelectedResource(null);
+      }
+      if (isCreatingLiteral) {
+        setLiteralDraft(EMPTY_LITERAL_DRAFT);
+      }
     } finally {
       setIsDeleting(false);
     }
   }
 
-  const canSave =
-    Boolean(selectedReference) &&
+  const canSaveImported =
+    selectedEntry?.kind === "imported" &&
     metadataDraft.invalidLines.length === 0 &&
-    hasDraftChanges(selectedReference!, draft, metadataDraft.metadata) &&
+    importedDraftChanged(selectedEntry.reference, importedDraft, metadataDraft.metadata) &&
     !isSaving &&
     !isDeleting;
+
+  const canSaveLiteral = (() => {
+    if (isSaving || isDeleting) {
+      return false;
+    }
+    const resource = literalDraft.resource.trim();
+    if (resource.length === 0 || literalDraft.value.length === 0) {
+      return false;
+    }
+    if (!selectedEntry || selectedEntry.kind !== "literal") {
+      return true;
+    }
+    return literalDraft.value !== selectedEntry.literal.value;
+  })();
+
+  const totalCount = entries.length;
+  const filteredCount = filteredEntries.length;
 
   return (
     <section
@@ -469,12 +640,16 @@ export function ImportedSecretCatalogPanel(
       data-testid="imported-secret-catalog-panel"
     >
       <div className="detail-section-header">
-        <h3>{t(props.locale, "importedCatalogTitle")}</h3>
-        <span>
-          {props.catalog?.catalog_path ?? t(props.locale, "notAvailable")}
-        </span>
+        <h3>{caption(props.locale, "Local Secret Catalog", "本地密钥目录")}</h3>
+        <span>{props.catalog?.catalog_path ?? caption(props.locale, "n/a", "不可用")}</span>
       </div>
-      <p className="section-copy">{t(props.locale, "importedCatalogHelp")}</p>
+      <p className="section-copy">
+        {caption(
+          props.locale,
+          "Manage imported references and manual local secret values in one tree. Manual values are stored locally, while imported entries keep locator-only metadata.",
+          "通过一棵树统一管理导入引用和手工本地密钥值。手工值会保存在本地；导入项仍只保存 locator 与元信息。",
+        )}
+      </p>
 
       {props.errorMessage ? (
         <section
@@ -492,27 +667,43 @@ export function ImportedSecretCatalogPanel(
         </section>
       ) : null}
 
-      <div className="password-actions">
+      <div className="catalog-toolbar">
         <input
           className="settings-input imported-search-input"
           data-testid="imported-secret-search"
           onChange={(event) => {
             setSearchQuery(event.currentTarget.value);
           }}
-          placeholder={t(props.locale, "importedCatalogSearchPlaceholder")}
+          placeholder={caption(
+            props.locale,
+            "Search resource path, display name, tag, metadata, or locator value",
+            "搜索资源路径、显示名、标签、元信息或 locator 值",
+          )}
           type="search"
           value={searchQuery}
         />
-        <button
-          className="ghost"
-          disabled={props.isLoading}
-          onClick={() => {
-            void props.onReload();
-          }}
-          type="button"
-        >
-          {t(props.locale, "refresh")}
-        </button>
+        <div className="catalog-toolbar-actions">
+          <button
+            className="ghost"
+            disabled={props.isLoading}
+            onClick={() => {
+              void props.onReload();
+            }}
+            type="button"
+          >
+            {caption(props.locale, "Refresh", "刷新")}
+          </button>
+          <button
+            className="ghost"
+            data-testid="local-secret-create"
+            onClick={() => {
+              startCreatingLiteral();
+            }}
+            type="button"
+          >
+            {caption(props.locale, "Manual Add", "手工添加")}
+          </button>
+        </div>
       </div>
 
       <div className="imported-catalog-layout">
@@ -521,29 +712,37 @@ export function ImportedSecretCatalogPanel(
           data-testid="imported-secret-tree-panel"
         >
           <div className="detail-section-header">
-            <h3>{t(props.locale, "importedCatalogTreeTitle")}</h3>
+            <h3>{caption(props.locale, "Resource Tree", "资源树")}</h3>
             <span>
               {props.isLoading
-                ? t(props.locale, "loadingQueue")
-                : `${filteredImports.length}/${imports.length}`}
+                ? caption(props.locale, "Loading", "加载中")
+                : `${filteredCount}/${totalCount}`}
             </span>
           </div>
 
           {props.isLoading ? (
             <p className="empty" data-testid="imported-secret-tree-loading">
-              {t(props.locale, "loadingQueue")}
+              {caption(props.locale, "Loading", "加载中")}
             </p>
           ) : tree.length === 0 ? (
             <p className="empty" data-testid="imported-secret-tree-empty">
               {searchQuery.trim().length > 0
-                ? t(props.locale, "importedCatalogSearchEmpty")
-                : t(props.locale, "importedCatalogEmpty")}
+                ? caption(
+                    props.locale,
+                    "No secrets match the current search",
+                    "当前搜索没有匹配的密钥",
+                  )
+                : caption(
+                    props.locale,
+                    "No local secrets yet",
+                    "还没有本地密钥",
+                  )}
             </p>
           ) : (
             <TreeBranch
               locale={props.locale}
               nodes={tree}
-              onSelect={setSelectedResource}
+              onSelect={selectEntry}
               selectedResource={selectedResource}
             />
           )}
@@ -554,75 +753,153 @@ export function ImportedSecretCatalogPanel(
           data-testid="imported-secret-detail-panel"
         >
           <div className="detail-section-header">
-            <h3>{t(props.locale, "importedCatalogDetailsTitle")}</h3>
+            <h3>{caption(props.locale, "Secret Details", "密钥详情")}</h3>
             <span>
-              {selectedReference
-                ? translateCode(props.locale, selectedReference.provider_kind)
-                : t(props.locale, "notAvailable")}
+              {isCreatingLiteral
+                ? caption(props.locale, "Manual", "手工")
+                : selectedEntry?.kind === "literal"
+                  ? caption(props.locale, "Manual", "手工")
+                  : selectedEntry
+                    ? translateCode(props.locale, selectedEntry.reference.provider_kind)
+                    : caption(props.locale, "n/a", "不可用")}
             </span>
           </div>
 
-          {!selectedReference ? (
+          {!selectedEntry && !isCreatingLiteral ? (
             <p className="empty">
-              {t(props.locale, "importedCatalogSelectHint")}
+              {caption(
+                props.locale,
+                "Select an entry from the tree, or add a manual secret.",
+                "请从左侧资源树选择一条记录，或手工新增一个密钥。",
+              )}
             </p>
-          ) : (
+          ) : isCreatingLiteral || selectedEntry?.kind === "literal" ? (
+            <div className="panel-stack">
+              <p className="section-copy">
+                {literalEditModeDescription(props.locale, selectedEntry)}
+              </p>
+
+              <div className="settings-form-grid">
+                <label className="settings-field" data-testid="local-secret-resource">
+                  <span className="field-label">
+                    {caption(props.locale, "Resource", "资源标识")}
+                  </span>
+                  <input
+                    className="settings-input"
+                    disabled={!isCreatingLiteral}
+                    onChange={(event) => {
+                      setLiteralDraft((current) => ({
+                        ...current,
+                        resource: event.currentTarget.value,
+                      }));
+                    }}
+                    type="text"
+                    value={literalDraft.resource}
+                  />
+                </label>
+
+                <label
+                  className="settings-field settings-field-wide"
+                  data-testid="local-secret-value"
+                >
+                  <span className="field-label">
+                    {caption(props.locale, "Secret Value", "密钥值")}
+                  </span>
+                  <textarea
+                    className="settings-input note-field"
+                    onChange={(event) => {
+                      setLiteralDraft((current) => ({
+                        ...current,
+                        value: event.currentTarget.value,
+                      }));
+                    }}
+                    value={literalDraft.value}
+                  />
+                </label>
+              </div>
+
+              <div className="actions">
+                <button
+                  className="primary"
+                  data-testid="local-secret-save"
+                  disabled={!canSaveLiteral}
+                  onClick={() => {
+                    void handleSaveLiteral();
+                  }}
+                  type="button"
+                >
+                  {isSaving
+                    ? caption(props.locale, "Saving...", "保存中...")
+                    : caption(props.locale, "Save", "保存")}
+                </button>
+                {isCreatingLiteral ? (
+                  <button
+                    className="ghost"
+                    data-testid="local-secret-cancel"
+                    disabled={isSaving || isDeleting}
+                    onClick={cancelLiteralEdit}
+                    type="button"
+                  >
+                    {caption(props.locale, "Cancel", "取消")}
+                  </button>
+                ) : null}
+                {!isCreatingLiteral ? (
+                  <button
+                    className="danger"
+                    data-testid="local-secret-delete"
+                    disabled={isSaving || isDeleting}
+                    onClick={() => {
+                      void handleDelete();
+                    }}
+                    type="button"
+                  >
+                    {isDeleting
+                      ? caption(props.locale, "Deleting...", "删除中...")
+                      : caption(props.locale, "Delete", "删除")}
+                  </button>
+                ) : null}
+              </div>
+            </div>
+          ) : selectedEntry ? (
             <div className="panel-stack">
               <dl className="facts">
                 <div>
-                  <dt>{t(props.locale, "resourceId")}</dt>
-                  <dd>{selectedReference.resource}</dd>
+                  <dt>{caption(props.locale, "Resource", "资源标识")}</dt>
+                  <dd>{selectedEntry.reference.resource}</dd>
                 </div>
                 <div>
-                  <dt>{t(props.locale, "displayName")}</dt>
-                  <dd>{selectedReference.display_name}</dd>
+                  <dt>{caption(props.locale, "Display Name", "显示名称")}</dt>
+                  <dd>{selectedEntry.reference.display_name}</dd>
                 </div>
                 <div>
-                  <dt>{t(props.locale, "importedAt")}</dt>
+                  <dt>{caption(props.locale, "Imported At", "导入时间")}</dt>
                   <dd>
                     {formatTimestamp(
-                      selectedReference.imported_at,
-                      t(props.locale, "notAvailable"),
+                      selectedEntry.reference.imported_at,
+                      caption(props.locale, "n/a", "不可用"),
                       props.locale,
                     )}
                   </dd>
                 </div>
                 <div>
-                  <dt>{t(props.locale, "lastVerifiedAt")}</dt>
+                  <dt>{caption(props.locale, "Last Verified", "最近校验时间")}</dt>
                   <dd>
                     {formatTimestamp(
-                      selectedReference.last_verified_at ?? null,
-                      t(props.locale, "notAvailable"),
+                      selectedEntry.reference.last_verified_at ?? null,
+                      caption(props.locale, "n/a", "不可用"),
                       props.locale,
                     )}
                   </dd>
                 </div>
               </dl>
 
-              <div className="detail-section detail-section-low">
-                <div className="detail-section-header">
-                  <h3>{t(props.locale, "sourceLocatorValues")}</h3>
-                  <span>
-                    {translateCode(
-                      props.locale,
-                      selectedReference.provider_kind,
-                    )}
-                  </span>
-                </div>
-                <p className="section-copy">
-                  {t(props.locale, "sourceLocatorReadonlyHelp")}
-                </p>
-                <dl className="facts">
-                  {getLocatorEntries(props.locale, selectedReference).map(
-                    (entry) => (
-                      <div key={entry.label}>
-                        <dt>{entry.label}</dt>
-                        <dd>{entry.value}</dd>
-                      </div>
-                    ),
-                  )}
-                </dl>
-              </div>
+              <p className="section-copy">
+                {caption(
+                  props.locale,
+                  "Imported entries do not store the real secret value locally. Re-import the source or create a manual local secret if you need a local editable value.",
+                  "导入项不会在本地保存真实密钥值。如需本地可编辑的值，请重新导入来源，或新建一个手工本地密钥。",
+                )}
+              </p>
 
               <div className="settings-form-grid">
                 <label
@@ -630,18 +907,18 @@ export function ImportedSecretCatalogPanel(
                   data-testid="imported-secret-display-name"
                 >
                   <span className="field-label">
-                    {t(props.locale, "displayName")}
+                    {caption(props.locale, "Display Name", "显示名称")}
                   </span>
                   <input
                     className="settings-input"
                     onChange={(event) => {
-                      setDraft((current) => ({
+                      setImportedDraft((current) => ({
                         ...current,
                         displayName: event.currentTarget.value,
                       }));
                     }}
                     type="text"
-                    value={draft.displayName}
+                    value={importedDraft.displayName}
                   />
                 </label>
 
@@ -650,18 +927,18 @@ export function ImportedSecretCatalogPanel(
                   data-testid="imported-secret-description"
                 >
                   <span className="field-label">
-                    {t(props.locale, "description")}
+                    {caption(props.locale, "Description", "描述")}
                   </span>
                   <input
                     className="settings-input"
                     onChange={(event) => {
-                      setDraft((current) => ({
+                      setImportedDraft((current) => ({
                         ...current,
                         description: event.currentTarget.value,
                       }));
                     }}
                     type="text"
-                    value={draft.description}
+                    value={importedDraft.description}
                   />
                 </label>
 
@@ -669,17 +946,19 @@ export function ImportedSecretCatalogPanel(
                   className="settings-field"
                   data-testid="imported-secret-tags"
                 >
-                  <span className="field-label">{t(props.locale, "tags")}</span>
+                  <span className="field-label">
+                    {caption(props.locale, "Tags", "标签")}
+                  </span>
                   <input
                     className="settings-input"
                     onChange={(event) => {
-                      setDraft((current) => ({
+                      setImportedDraft((current) => ({
                         ...current,
                         tags: event.currentTarget.value,
                       }));
                     }}
                     type="text"
-                    value={draft.tags}
+                    value={importedDraft.tags}
                   />
                 </label>
 
@@ -688,29 +967,78 @@ export function ImportedSecretCatalogPanel(
                   data-testid="imported-secret-metadata"
                 >
                   <span className="field-label">
-                    {t(props.locale, "metadata")}
+                    {caption(props.locale, "Metadata", "元信息")}
                   </span>
                   <textarea
                     className="settings-input note-field"
                     onChange={(event) => {
-                      setDraft((current) => ({
+                      setImportedDraft((current) => ({
                         ...current,
                         metadata: event.currentTarget.value,
                       }));
                     }}
-                    value={draft.metadata}
+                    value={importedDraft.metadata}
                   />
                   <span className="field-hint">
                     {metadataDraft.invalidLines.length > 0
-                      ? `${t(props.locale, "metadataFormatHelp")} (${metadataDraft.invalidLines.join(", ")})`
-                      : t(props.locale, "metadataFormatHelp")}
+                      ? `${caption(props.locale, "Use KEY=VALUE lines.", "请使用 KEY=VALUE 格式。")} (${metadataDraft.invalidLines.join(", ")})`
+                      : caption(
+                          props.locale,
+                          "Use one KEY=VALUE pair per line.",
+                          "每行使用一个 KEY=VALUE。",
+                        )}
                   </span>
                 </label>
               </div>
 
-              {selectedReference.tags.length > 0 ? (
+              <div className="catalog-source-section">
+                <button
+                  className="ghost catalog-toggle"
+                  data-testid="catalog-locator-toggle"
+                  onClick={() => {
+                    setIsLocatorOpen((current) => !current);
+                  }}
+                  type="button"
+                >
+                  {isLocatorOpen
+                    ? caption(props.locale, "Hide Source", "收起来源")
+                    : caption(props.locale, "Show Source", "展开来源")}
+                </button>
+                {isLocatorOpen ? (
+                  <div className="detail-section detail-section-low">
+                    <div className="detail-section-header">
+                      <h3>{caption(props.locale, "Source Locator", "来源定位值")}</h3>
+                      <span>
+                        {translateCode(
+                          props.locale,
+                          selectedEntry.reference.provider_kind,
+                        )}
+                      </span>
+                    </div>
+                    <p className="section-copy">
+                      {caption(
+                        props.locale,
+                        "Locator values are read-only here. Re-import if the upstream path changes.",
+                        "这里的 locator 值只读；如果外部路径变了，请重新导入。",
+                      )}
+                    </p>
+                    <dl className="facts">
+                      {importedLocatorEntries(props.locale, selectedEntry.reference).map(
+                        (entry) => (
+                          <div key={entry.label}>
+                            <dt>{entry.label}</dt>
+                            <dd>{entry.value}</dd>
+                          </div>
+                        ),
+                      )}
+                    </dl>
+                  </div>
+                ) : null}
+              </div>
+
+              {(selectedEntry.reference.tags?.length ?? 0) > 0 ? (
                 <div className="imported-tag-list">
-                  {selectedReference.tags.map((tag) => (
+                  {(selectedEntry.reference.tags ?? []).map((tag) => (
                     <span className="id-pill" key={tag}>
                       {tag}
                     </span>
@@ -720,17 +1048,28 @@ export function ImportedSecretCatalogPanel(
 
               <div className="actions">
                 <button
+                  className="ghost"
+                  data-testid="imported-secret-edit-local"
+                  disabled={isSaving || isDeleting}
+                  onClick={() => {
+                    startCreatingLiteral(selectedEntry.reference.resource);
+                  }}
+                  type="button"
+                >
+                  {caption(props.locale, "Edit Local Value", "改为本地值")}
+                </button>
+                <button
                   className="primary"
                   data-testid="imported-secret-save"
-                  disabled={!canSave}
+                  disabled={!canSaveImported}
                   onClick={() => {
-                    void handleSave();
+                    void handleSaveImported();
                   }}
                   type="button"
                 >
                   {isSaving
-                    ? t(props.locale, "saving")
-                    : t(props.locale, "save")}
+                    ? caption(props.locale, "Saving...", "保存中...")
+                    : caption(props.locale, "Save", "保存")}
                 </button>
                 <button
                   className="danger"
@@ -742,12 +1081,12 @@ export function ImportedSecretCatalogPanel(
                   type="button"
                 >
                   {isDeleting
-                    ? t(props.locale, "deletingImport")
-                    : t(props.locale, "deleteImport")}
+                    ? caption(props.locale, "Deleting...", "删除中...")
+                    : caption(props.locale, "Delete", "删除")}
                 </button>
               </div>
             </div>
-          )}
+          ) : null}
         </section>
       </div>
     </section>

@@ -204,7 +204,7 @@ impl SqliteStore {
         let request_row = sqlx::query(
             r#"
             SELECT
-                id, policy_mode, approval_status, final_decision, provider_kind,
+                id, resource, policy_mode, approval_status, final_decision, provider_kind,
                 rendered_prompt, provider_input_json, llm_suggestion_json,
                 automatic_decision_json, context_json, created_at, updated_at, resolved_at
             FROM access_requests
@@ -247,7 +247,7 @@ impl SqliteStore {
         let rows = sqlx::query(
             r#"
             SELECT
-                id, policy_mode, approval_status, final_decision, provider_kind,
+                id, resource, policy_mode, approval_status, final_decision, provider_kind,
                 rendered_prompt, provider_input_json, llm_suggestion_json,
                 automatic_decision_json, context_json, created_at, updated_at, resolved_at
             FROM access_requests
@@ -331,7 +331,7 @@ impl SqliteStore {
         let row = sqlx::query(
             r#"
             SELECT
-                id, policy_mode, approval_status, final_decision, provider_kind,
+                id, resource, policy_mode, approval_status, final_decision, provider_kind,
                 rendered_prompt, provider_input_json, llm_suggestion_json,
                 automatic_decision_json, context_json, created_at, updated_at, resolved_at
             FROM access_requests
@@ -444,8 +444,9 @@ async fn insert_audits<'a>(
 }
 
 fn decode_request(row: &sqlx::sqlite::SqliteRow) -> Result<AccessRequest, StoreError> {
-    let context: RequestContext =
+    let mut context: RequestContext =
         serde_json::from_str(row.try_get::<String, _>("context_json")?.as_str())?;
+    context.resource = row.try_get("resource")?;
     let policy_mode = parse_enum(row.try_get::<String, _>("policy_mode")?.as_str())?;
     let approval_status = parse_enum(row.try_get::<String, _>("approval_status")?.as_str())?;
     let final_decision = match row.try_get::<Option<String>, _>("final_decision")? {
@@ -535,11 +536,13 @@ where
 
 #[cfg(test)]
 mod tests {
+    use serde_json::Value;
     use tempfile::tempdir;
 
     use plankton_core::{
         load_settings, ApprovalStatus, AuditAction, AutomaticDisposition, CallChainNode, Decision,
-        PolicyMode, RequestContext,
+        PolicyMode, RequestContext, LLM_ADVICE_TEMPLATE_ID, LLM_ADVICE_TEMPLATE_VERSION,
+        PROMPT_CONTRACT_VERSION,
     };
 
     use super::SqliteStore;
@@ -874,6 +877,98 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn reads_legacy_request_payloads_without_template_metadata() {
+        let temp = tempdir().expect("temp directory should be created");
+        let mut settings = load_settings().expect("default settings should load");
+        settings.database_url = format!("sqlite://{}", temp.path().join("plankton.db").display());
+        settings.provider_kind = "mock".to_string();
+
+        let store = SqliteStore::new(&settings)
+            .await
+            .expect("store should initialize");
+
+        let request = store
+            .submit_request(
+                &settings,
+                RequestContext::new(
+                    "secret/demo".to_string(),
+                    "Need legacy payload compatibility".to_string(),
+                    "alice".to_string(),
+                ),
+                PolicyMode::Assisted,
+            )
+            .await
+            .expect("request should be inserted");
+
+        let (provider_input_json, llm_suggestion_json): (String, String) = sqlx::query_as(
+            r#"
+            SELECT provider_input_json, llm_suggestion_json
+            FROM access_requests
+            WHERE id = ?
+            "#,
+        )
+        .bind(&request.id)
+        .fetch_one(&store.pool)
+        .await
+        .expect("request payloads should be queryable");
+
+        let legacy_provider_input_json = strip_template_metadata(provider_input_json);
+        let legacy_llm_suggestion_json = strip_template_metadata(llm_suggestion_json);
+
+        sqlx::query(
+            r#"
+            UPDATE access_requests
+            SET provider_input_json = ?, llm_suggestion_json = ?
+            WHERE id = ?
+            "#,
+        )
+        .bind(legacy_provider_input_json)
+        .bind(legacy_llm_suggestion_json)
+        .bind(&request.id)
+        .execute(&store.pool)
+        .await
+        .expect("legacy payload should be written");
+
+        let fetched = store
+            .get_request(&request.id)
+            .await
+            .expect("legacy payload should still deserialize");
+
+        let provider_input = fetched
+            .request
+            .provider_input
+            .expect("provider input should still exist");
+        assert_eq!(provider_input.template_id, LLM_ADVICE_TEMPLATE_ID);
+        assert_eq!(provider_input.template_version, LLM_ADVICE_TEMPLATE_VERSION);
+        assert_eq!(
+            provider_input.prompt_contract_version,
+            PROMPT_CONTRACT_VERSION
+        );
+        assert!(provider_input.prompt_sha256.is_empty());
+
+        let suggestion = fetched
+            .request
+            .llm_suggestion
+            .expect("llm suggestion should still exist");
+        assert_eq!(suggestion.template_id, LLM_ADVICE_TEMPLATE_ID);
+        assert_eq!(suggestion.template_version, LLM_ADVICE_TEMPLATE_VERSION);
+        assert_eq!(suggestion.prompt_contract_version, PROMPT_CONTRACT_VERSION);
+        assert!(suggestion.prompt_sha256.is_empty());
+
+        let updated = store
+            .record_decision(
+                &request.id,
+                Decision::Allow,
+                "reviewer",
+                Some("legacy payload still readable".to_string()),
+            )
+            .await
+            .expect("decision path should also tolerate legacy payloads");
+
+        assert_eq!(updated.approval_status, ApprovalStatus::Approved);
+    }
+
+    #[tokio::test]
     async fn lists_only_accessible_resources_without_duplicates_or_denied_entries() {
         let temp = tempdir().expect("temp directory should be created");
         let mut settings = load_settings().expect("default settings should load");
@@ -974,5 +1069,18 @@ mod tests {
         assert_eq!(resources[0].resource, "secret/shared-token");
         assert_eq!(resources[0].granted_by_request_id, superseding_allow.id);
         assert_eq!(resources[0].policy_mode, PolicyMode::Assisted);
+    }
+
+    fn strip_template_metadata(value: String) -> String {
+        let mut json: Value =
+            serde_json::from_str(value.as_str()).expect("payload should parse as json");
+        let object = json
+            .as_object_mut()
+            .expect("payload should deserialize to a json object");
+        object.remove("template_id");
+        object.remove("template_version");
+        object.remove("prompt_contract_version");
+        object.remove("prompt_sha256");
+        serde_json::to_string(&json).expect("payload should serialize back to json")
     }
 }

@@ -101,7 +101,7 @@ impl SqliteReadStore {
         let request_row = sqlx::query(
             r#"
             SELECT
-                id, policy_mode, approval_status, decision AS final_decision, provider_kind,
+                id, resource, policy_mode, approval_status, decision AS final_decision, provider_kind,
                 rendered_prompt, provider_input_json, llm_suggestion_json,
                 automatic_decision_json, context_json, created_at, updated_at, resolved_at
             FROM approval_requests
@@ -217,8 +217,9 @@ fn decode_queue_request(row: &SqliteRow) -> Result<QueueRequestRecord, StoreErro
 }
 
 fn decode_access_request(row: &SqliteRow) -> Result<AccessRequest, StoreError> {
-    let context: RequestContext =
+    let mut context: RequestContext =
         serde_json::from_str(row.try_get::<String, _>("context_json")?.as_str())?;
+    context.resource = row.try_get("resource")?;
 
     Ok(AccessRequest {
         id: row.try_get("id")?,
@@ -333,7 +334,9 @@ fn default_actor_type(action: AuditAction, actor_id: &str) -> &'static str {
 mod tests {
     use plankton_core::{
         load_settings, AuditAction, Decision, PolicyMode, RequestContext, SuggestedDecision,
+        LLM_ADVICE_TEMPLATE_ID, LLM_ADVICE_TEMPLATE_VERSION, PROMPT_CONTRACT_VERSION,
     };
+    use serde_json::Value;
     use tempfile::tempdir;
 
     use crate::SqliteStore;
@@ -537,5 +540,98 @@ mod tests {
             .expect("automatic decision audit should be projected");
         assert_eq!(auto_audit.actor_type, "system_auto");
         assert_eq!(auto_audit.decision, Some(SuggestedDecision::Allow));
+    }
+
+    #[tokio::test]
+    async fn reads_legacy_status_payloads_without_template_metadata() {
+        let temp = tempdir().expect("temp directory should be created");
+        let mut settings = load_settings().expect("default settings should load");
+        settings.database_url = format!("sqlite://{}", temp.path().join("plankton.db").display());
+        settings.provider_kind = "mock".to_string();
+
+        let store = SqliteStore::new(&settings)
+            .await
+            .expect("store should initialize");
+        let read_store = SqliteReadStore::new(&settings)
+            .await
+            .expect("read store should initialize");
+
+        let request = store
+            .submit_request(
+                &settings,
+                RequestContext::new(
+                    "secret/demo".to_string(),
+                    "Need legacy status compatibility".to_string(),
+                    "alice".to_string(),
+                ),
+                PolicyMode::Assisted,
+            )
+            .await
+            .expect("request should be inserted");
+
+        let (provider_input_json, llm_suggestion_json): (String, String) = sqlx::query_as(
+            r#"
+            SELECT provider_input_json, llm_suggestion_json
+            FROM access_requests
+            WHERE id = ?
+            "#,
+        )
+        .bind(&request.id)
+        .fetch_one(&read_store.pool)
+        .await
+        .expect("request payloads should be queryable");
+
+        sqlx::query(
+            r#"
+            UPDATE access_requests
+            SET provider_input_json = ?, llm_suggestion_json = ?
+            WHERE id = ?
+            "#,
+        )
+        .bind(strip_template_metadata(provider_input_json))
+        .bind(strip_template_metadata(llm_suggestion_json))
+        .bind(&request.id)
+        .execute(&read_store.pool)
+        .await
+        .expect("legacy payload should be written");
+
+        let status = read_store
+            .get_status(&request.id)
+            .await
+            .expect("status projection should tolerate legacy payload");
+
+        let provider_input = status
+            .request
+            .provider_input
+            .expect("provider input should still exist");
+        assert_eq!(provider_input.template_id, LLM_ADVICE_TEMPLATE_ID);
+        assert_eq!(provider_input.template_version, LLM_ADVICE_TEMPLATE_VERSION);
+        assert_eq!(
+            provider_input.prompt_contract_version,
+            PROMPT_CONTRACT_VERSION
+        );
+        assert!(provider_input.prompt_sha256.is_empty());
+
+        let suggestion = status
+            .request
+            .llm_suggestion
+            .expect("llm suggestion should still exist");
+        assert_eq!(suggestion.template_id, LLM_ADVICE_TEMPLATE_ID);
+        assert_eq!(suggestion.template_version, LLM_ADVICE_TEMPLATE_VERSION);
+        assert_eq!(suggestion.prompt_contract_version, PROMPT_CONTRACT_VERSION);
+        assert!(suggestion.prompt_sha256.is_empty());
+    }
+
+    fn strip_template_metadata(value: String) -> String {
+        let mut json: Value =
+            serde_json::from_str(value.as_str()).expect("payload should parse as json");
+        let object = json
+            .as_object_mut()
+            .expect("payload should deserialize to a json object");
+        object.remove("template_id");
+        object.remove("template_version");
+        object.remove("prompt_contract_version");
+        object.remove("prompt_sha256");
+        serde_json::to_string(&json).expect("payload should serialize back to json")
     }
 }

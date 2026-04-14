@@ -11,6 +11,7 @@ use dotenvy::from_path_iter;
 use minijinja::{Environment, UndefinedBehavior};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use tracing::{debug, warn};
 
 const LOCAL_SECRET_CATALOG_RESOLVER_KIND: &str = "local_secret_catalog";
 pub const ONEPASSWORD_CLI_PROVIDER_KIND: &str = "1password_cli";
@@ -324,6 +325,19 @@ pub struct ImportedSecretCatalog {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct LocalSecretLiteralEntry {
+    pub resource: String,
+    pub value: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct LocalSecretCatalog {
+    pub catalog_path: PathBuf,
+    pub literals: Vec<LocalSecretLiteralEntry>,
+    pub imports: Vec<ImportedSecretReference>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ImportedSecretReferenceUpdate {
     pub resource: String,
     pub display_name: Option<String>,
@@ -331,6 +345,12 @@ pub struct ImportedSecretReferenceUpdate {
     pub tags: Vec<String>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub metadata: BTreeMap<String, String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct LocalSecretLiteralUpsert {
+    pub resource: String,
+    pub value: String,
 }
 
 #[derive(Debug, Clone)]
@@ -377,6 +397,8 @@ impl VendorCliPrograms {
 pub enum SecretImportError {
     #[error("resource key is required")]
     MissingResource,
+    #[error("secret value is required")]
+    MissingSecretValue,
     #[error("batch import requires at least one source")]
     EmptyBatch,
     #[error("resource template is invalid: {message}")]
@@ -443,6 +465,12 @@ pub enum ValueResolverError {
     },
     #[error("{provider_kind} source for {resource} did not contain field {field}")]
     SourceFieldNotFound {
+        provider_kind: String,
+        resource: String,
+        field: String,
+    },
+    #[error("{provider_kind} source for {resource} contained field {field}, but its value was empty")]
+    SourceFieldEmpty {
         provider_kind: String,
         resource: String,
         field: String,
@@ -586,6 +614,10 @@ pub fn list_imported_secret_references() -> Result<ImportedSecretCatalog, Secret
     list_imported_secret_references_at(local_secret_catalog_path().as_path())
 }
 
+pub fn list_local_secret_catalog() -> Result<LocalSecretCatalog, SecretImportError> {
+    list_local_secret_catalog_at(local_secret_catalog_path().as_path())
+}
+
 pub fn list_imported_secret_references_at(
     path: &Path,
 ) -> Result<ImportedSecretCatalog, SecretImportError> {
@@ -596,6 +628,55 @@ pub fn list_imported_secret_references_at(
     Ok(ImportedSecretCatalog {
         catalog_path: path.to_path_buf(),
         imports: catalog.imports,
+    })
+}
+
+pub fn list_local_secret_catalog_at(path: &Path) -> Result<LocalSecretCatalog, SecretImportError> {
+    let mut catalog = load_secret_catalog_file_optional(path)?;
+    let mut literals = catalog
+        .secrets
+        .into_iter()
+        .chain(catalog.values)
+        .map(|(resource, value)| LocalSecretLiteralEntry { resource, value })
+        .collect::<Vec<_>>();
+    literals.sort_by(|left, right| left.resource.cmp(&right.resource));
+    catalog
+        .imports
+        .sort_by(|left, right| left.resource.cmp(&right.resource));
+    Ok(LocalSecretCatalog {
+        catalog_path: path.to_path_buf(),
+        literals,
+        imports: catalog.imports,
+    })
+}
+
+pub fn upsert_local_secret_literal(
+    entry: LocalSecretLiteralUpsert,
+) -> Result<LocalSecretLiteralEntry, SecretImportError> {
+    upsert_local_secret_literal_at(local_secret_catalog_path().as_path(), entry)
+}
+
+pub fn upsert_local_secret_literal_at(
+    path: &Path,
+    entry: LocalSecretLiteralUpsert,
+) -> Result<LocalSecretLiteralEntry, SecretImportError> {
+    let resource = entry.resource.trim();
+    if resource.is_empty() {
+        return Err(SecretImportError::MissingResource);
+    }
+    if entry.value.is_empty() {
+        return Err(SecretImportError::MissingSecretValue);
+    }
+
+    let mut catalog = load_secret_catalog_file_optional(path)?;
+    catalog.values.remove(resource);
+    catalog.secrets.insert(resource.to_string(), entry.value.clone());
+    catalog.imports.retain(|reference| reference.resource != resource);
+    save_secret_catalog_file(path, &catalog)?;
+
+    Ok(LocalSecretLiteralEntry {
+        resource: resource.to_string(),
+        value: entry.value,
     })
 }
 
@@ -647,21 +728,34 @@ pub fn delete_imported_secret_reference(resource: &str) -> Result<bool, SecretIm
     delete_imported_secret_reference_at(local_secret_catalog_path().as_path(), resource)
 }
 
+pub fn delete_local_secret_entry(resource: &str) -> Result<bool, SecretImportError> {
+    delete_local_secret_entry_at(local_secret_catalog_path().as_path(), resource)
+}
+
 pub fn delete_imported_secret_reference_at(
     path: &Path,
     resource: &str,
 ) -> Result<bool, SecretImportError> {
+    delete_local_secret_entry_at(path, resource)
+}
+
+pub fn delete_local_secret_entry_at(
+    path: &Path,
+    resource: &str,
+) -> Result<bool, SecretImportError> {
     let mut catalog = load_secret_catalog_file_optional(path)?;
+    let mut deleted = false;
+    deleted |= catalog.secrets.remove(resource).is_some();
+    deleted |= catalog.values.remove(resource).is_some();
     let next_len = catalog
         .imports
         .iter()
         .filter(|reference| reference.resource != resource)
         .count();
-
-    if next_len == catalog.imports.len() {
+    deleted |= next_len != catalog.imports.len();
+    if !deleted {
         return Ok(false);
     }
-
     catalog
         .imports
         .retain(|reference| reference.resource != resource);
@@ -1161,8 +1255,34 @@ fn resolve_onepassword_reference(
             resource: resource.to_string(),
             message: error.to_string(),
         })?;
+    let available_fields = item
+        .get("fields")
+        .and_then(Value::as_array)
+        .map(|fields| describe_onepassword_fields(fields))
+        .unwrap_or_default();
 
-    if normalize_match(locator.field, "notes") || normalize_match(locator.field, "notesplain") {
+    let notes_selector = locator.field_id.unwrap_or(locator.field);
+    debug!(
+        resource,
+        account = account_selector,
+        vault = vault_selector,
+        item_selector,
+        field = locator.field,
+        field_id = locator.field_id,
+        notes_selector,
+        has_top_level_notes = item
+            .get("notesPlain")
+            .and_then(|value| value.as_str())
+            .map(|value| !value.trim().is_empty())
+            .unwrap_or(false),
+        available_fields = available_fields.join(", "),
+        "resolving 1Password reference"
+    );
+    if normalize_match(locator.field, "notes")
+        || normalize_match(locator.field, "notesplain")
+        || normalize_match(notes_selector, "notes")
+        || normalize_match(notes_selector, "notesplain")
+    {
         if let Some(notes) = item.get("notesPlain").and_then(Value::as_str) {
             return ensure_non_empty_value(
                 ONEPASSWORD_CLI_PROVIDER_KIND,
@@ -1172,6 +1292,11 @@ fn resolve_onepassword_reference(
             );
         }
     }
+
+    let is_notes_selector = normalize_match(locator.field, "notes")
+        || normalize_match(locator.field, "notesplain")
+        || normalize_match(notes_selector, "notes")
+        || normalize_match(notes_selector, "notesplain");
 
     let field_entry = item
         .get("fields")
@@ -1198,11 +1323,38 @@ fn resolve_onepassword_reference(
                         .and_then(Value::as_str)
                         .map(|value| normalize_match(locator.field, value))
                         .unwrap_or(false);
-                id_matches || selector_matches
+                let notes_matches = is_notes_selector
+                    && (field
+                        .get("id")
+                        .and_then(Value::as_str)
+                        .map(|value| normalize_match(value, "notesplain"))
+                        .unwrap_or(false)
+                        || field
+                            .get("label")
+                            .and_then(Value::as_str)
+                            .map(|value| normalize_match(value, "notesplain"))
+                            .unwrap_or(false)
+                        || field
+                            .get("purpose")
+                            .and_then(Value::as_str)
+                            .map(|value| normalize_match(value, "notes"))
+                            .unwrap_or(false));
+                id_matches || selector_matches || notes_matches
             })
         });
 
     let Some(field_entry) = field_entry else {
+        warn!(
+            resource,
+            account = account_selector,
+            vault = vault_selector,
+            item_selector,
+            field = locator.field,
+            field_id = locator.field_id,
+            notes_selector,
+            available_fields = available_fields.join(", "),
+            "1Password field lookup failed"
+        );
         return Err(ValueResolverError::SourceFieldNotFound {
             provider_kind: ONEPASSWORD_CLI_PROVIDER_KIND.to_string(),
             resource: resource.to_string(),
@@ -1427,7 +1579,7 @@ fn ensure_non_empty_value(
     value: &str,
 ) -> Result<String, ValueResolverError> {
     if value.is_empty() {
-        return Err(ValueResolverError::SourceFieldNotFound {
+        return Err(ValueResolverError::SourceFieldEmpty {
             provider_kind: provider_kind.to_string(),
             resource: resource.to_string(),
             field: field.to_string(),
@@ -1481,6 +1633,18 @@ fn compact_process_message(output: &std::process::Output) -> String {
 
 fn normalize_match(left: &str, right: &str) -> bool {
     left.trim().eq_ignore_ascii_case(right.trim())
+}
+
+fn describe_onepassword_fields(fields: &[Value]) -> Vec<String> {
+    fields
+        .iter()
+        .map(|field| {
+            let id = field.get("id").and_then(Value::as_str).unwrap_or("-");
+            let label = field.get("label").and_then(Value::as_str).unwrap_or("-");
+            let purpose = field.get("purpose").and_then(Value::as_str).unwrap_or("-");
+            format!("{id}:{label}:{purpose}")
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -1969,6 +2133,168 @@ exit 1
                 )
                 .expect("1Password value should resolve"),
             "op-secret"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn resolves_1password_notesplain_reference_via_cli_contract() {
+        let temp = tempdir().expect("temp directory should be created");
+        let op_path = temp.path().join("op");
+        write_executable(
+            op_path.as_path(),
+            r#"#!/bin/sh
+cmd1="$1"
+cmd2="$2"
+account=""
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = "--account" ]; then
+    account="$2"
+    break
+  fi
+  shift
+done
+
+if [ "$account" != "acct-1" ]; then
+  echo "expected --account acct-1, got $account" >&2
+  exit 1
+fi
+
+if [ "$cmd1" = "item" ] && [ "$cmd2" = "get" ]; then
+  cat <<'JSON'
+{"fields":[{"id":"notesPlain","label":"notesPlain","reference":"op://vault/item/notesPlain"}],"notesPlain":"op notes"}
+JSON
+  exit 0
+fi
+echo "unexpected op invocation" >&2
+exit 1
+"#,
+        );
+        let catalog_path = temp.path().join("catalog.toml");
+
+        import_secret_reference_at_with_programs(
+            catalog_path.as_path(),
+            SecretImportSpec {
+                resource: "secret/op-notes".to_string(),
+                display_name: None,
+                description: None,
+                tags: Vec::new(),
+                metadata: BTreeMap::new(),
+                source_locator: SecretSourceLocator::OnePasswordCli {
+                    account: "demo@example.com".to_string(),
+                    account_id: Some("acct-1".to_string()),
+                    vault: "Engineering".to_string(),
+                    item: "API Token".to_string(),
+                    field: "notesPlain".to_string(),
+                    vault_id: None,
+                    item_id: None,
+                    field_id: Some("notesPlain".to_string()),
+                },
+            },
+            &VendorCliPrograms {
+                onepassword: op_path.clone(),
+                bitwarden: temp.path().join("bw"),
+            },
+        )
+        .expect("1Password notes import should succeed");
+
+        let resolver = LocalSecretCatalogResolver::load_from_path(catalog_path.as_path())
+            .expect("resolver should load");
+        assert_eq!(
+            resolver
+                .resolve_with_programs(
+                    "secret/op-notes",
+                    &VendorCliPrograms {
+                        onepassword: op_path,
+                        bitwarden: temp.path().join("bw"),
+                    },
+                )
+                .expect("1Password notes value should resolve"),
+            "op notes"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn resolves_1password_reference_only_notes_field_via_cli_contract() {
+        let temp = tempdir().expect("temp directory should be created");
+        let op_path = temp.path().join("op");
+        write_executable(
+            op_path.as_path(),
+            r#"#!/bin/sh
+cmd1="$1"
+cmd2="$2"
+account=""
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = "--account" ]; then
+    account="$2"
+    break
+  fi
+  shift
+done
+
+if [ "$account" != "acct-1" ]; then
+  echo "expected --account acct-1, got $account" >&2
+  exit 1
+fi
+
+if [ "$cmd1" = "item" ] && [ "$cmd2" = "get" ]; then
+  cat <<'JSON'
+{"fields":[{"id":"notesPlain","label":"notesPlain","purpose":"NOTES","reference":"op://vault/item/notesPlain"}]}
+JSON
+  exit 0
+fi
+
+if [ "$cmd1" = "read" ]; then
+  printf 'op notes'
+  exit 0
+fi
+
+echo "unexpected op invocation" >&2
+exit 1
+"#,
+        );
+        let catalog_path = temp.path().join("catalog.toml");
+
+        import_secret_reference_at_with_programs(
+            catalog_path.as_path(),
+            SecretImportSpec {
+                resource: "secret/op-notes-ref".to_string(),
+                display_name: None,
+                description: None,
+                tags: Vec::new(),
+                metadata: BTreeMap::new(),
+                source_locator: SecretSourceLocator::OnePasswordCli {
+                    account: "demo@example.com".to_string(),
+                    account_id: Some("acct-1".to_string()),
+                    vault: "Engineering".to_string(),
+                    item: "API Token".to_string(),
+                    field: "notes".to_string(),
+                    vault_id: None,
+                    item_id: None,
+                    field_id: Some("notesPlain".to_string()),
+                },
+            },
+            &VendorCliPrograms {
+                onepassword: op_path.clone(),
+                bitwarden: temp.path().join("bw"),
+            },
+        )
+        .expect("1Password reference-only notes import should succeed");
+
+        let resolver = LocalSecretCatalogResolver::load_from_path(catalog_path.as_path())
+            .expect("resolver should load");
+        assert_eq!(
+            resolver
+                .resolve_with_programs(
+                    "secret/op-notes-ref",
+                    &VendorCliPrograms {
+                        onepassword: op_path,
+                        bitwarden: temp.path().join("bw"),
+                    },
+                )
+                .expect("1Password reference-only notes value should resolve"),
+            "op notes"
         );
     }
 

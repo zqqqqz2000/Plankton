@@ -10,16 +10,19 @@ use import_browse::{
     DotenvInspection, ImportFieldOption, ImportPickerOption,
 };
 use plankton_core::{
-    delete_imported_secret_reference, import_secret_reference, import_secret_references,
-    list_imported_secret_references, load_settings, preview_call_chain_for_desktop,
-    save_user_default_policy_mode, save_user_settings, update_imported_secret_reference,
+    delete_imported_secret_reference, delete_local_secret_entry, import_secret_reference,
+    import_secret_references, list_imported_secret_references, list_local_secret_catalog,
+    load_settings, preview_call_chain_for_desktop, save_user_default_policy_mode,
+    save_user_settings, update_imported_secret_reference, upsert_local_secret_literal,
     AccessRequest, DashboardData, Decision, ImportedSecretBatchReceipt, ImportedSecretCatalog,
-    ImportedSecretReceipt, ImportedSecretReferenceUpdate, PlanktonSettings, PolicyMode,
+    ImportedSecretReceipt, ImportedSecretReferenceUpdate, LocalSecretCatalog,
+    LocalSecretLiteralEntry, LocalSecretLiteralUpsert, PlanktonSettings, PolicyMode,
     SecretImportBatchSpec, SecretImportSpec, UserSettings,
 };
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, Listener, Manager, Runtime, State};
 use tokio::task;
+use tracing::{error, info};
 use url::Url;
 
 const DEEP_LINK_EVENT: &str = "deep-link://new-url";
@@ -231,19 +234,66 @@ async fn save_desktop_settings(
 
 #[tauri::command]
 async fn import_secret_source(spec: SecretImportSpec) -> Result<ImportedSecretReceipt, String> {
-    import_secret_reference(spec).map_err(|error| error.to_string())
+    let provider_kind = spec.source_locator.provider_kind().to_string();
+    let resource = spec.resource.clone();
+    info!(
+        provider_kind = %provider_kind,
+        resource = %resource,
+        "desktop import_secret_source start"
+    );
+    match import_secret_reference(spec) {
+        Ok(receipt) => {
+            info!(
+                provider_kind = %provider_kind,
+                resource = %receipt.reference.resource,
+                "desktop import_secret_source success"
+            );
+            Ok(receipt)
+        }
+        Err(error) => {
+            error!(
+                provider_kind = %provider_kind,
+                resource = %resource,
+                error = %error,
+                "desktop import_secret_source failed"
+            );
+            Err(error.to_string())
+        }
+    }
 }
 
 #[tauri::command]
 async fn import_secret_sources(
     spec: SecretImportBatchSpec,
 ) -> Result<ImportedSecretBatchReceipt, String> {
-    import_secret_references(spec).map_err(|error| error.to_string())
+    info!(
+        import_count = spec.imports.len(),
+        resource_template = ?spec.resource_template,
+        "desktop import_secret_sources start"
+    );
+    match import_secret_references(spec) {
+        Ok(receipt) => {
+            info!(
+                imported_count = receipt.receipts.len(),
+                "desktop import_secret_sources success"
+            );
+            Ok(receipt)
+        }
+        Err(error) => {
+            error!(error = %error, "desktop import_secret_sources failed");
+            Err(error.to_string())
+        }
+    }
 }
 
 #[tauri::command]
 async fn list_imported_secret_sources() -> Result<ImportedSecretCatalog, String> {
     list_imported_secret_references().map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+async fn list_local_secret_catalog_command() -> Result<LocalSecretCatalog, String> {
+    list_local_secret_catalog().map_err(|error| error.to_string())
 }
 
 #[tauri::command]
@@ -254,8 +304,20 @@ async fn update_imported_secret_source(
 }
 
 #[tauri::command]
+async fn upsert_local_secret_literal_command(
+    entry: LocalSecretLiteralUpsert,
+) -> Result<LocalSecretLiteralEntry, String> {
+    upsert_local_secret_literal(entry).map_err(|error| error.to_string())
+}
+
+#[tauri::command]
 async fn delete_imported_secret_source(resource: String) -> Result<bool, String> {
     delete_imported_secret_reference(resource.as_str()).map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+async fn delete_local_secret_entry_command(resource: String) -> Result<bool, String> {
+    delete_local_secret_entry(resource.as_str()).map_err(|error| error.to_string())
 }
 
 #[tauri::command]
@@ -407,8 +469,11 @@ fn run() -> Result<()> {
             import_secret_source,
             import_secret_sources,
             list_imported_secret_sources,
+            list_local_secret_catalog_command,
             update_imported_secret_source,
             delete_imported_secret_source,
+            upsert_local_secret_literal_command,
+            delete_local_secret_entry_command,
             list_onepassword_accounts_command,
             list_onepassword_vaults_command,
             list_onepassword_items_command,

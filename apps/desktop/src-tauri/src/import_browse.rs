@@ -9,6 +9,7 @@ use anyhow::{anyhow, Context, Result};
 use dotenvy::from_path_iter;
 use serde::Serialize;
 use serde_json::Value;
+use tracing::{debug, error, info};
 use url::Url;
 
 const ALL_CONTAINERS_ID: &str = "all";
@@ -279,27 +280,57 @@ fn list_onepassword_fields_with_program(
             "json",
         ],
     )?;
-    let mut fields = Vec::new();
-
-    if let Some(notes) = string_field(&response, "notesPlain") {
-        if !notes.trim().is_empty() {
-            fields.push(ImportFieldOption {
-                selector: "notes".to_string(),
-                label: "notes".to_string(),
-                subtitle: Some("Secure Note".to_string()),
-                field_id: None,
-            });
-        }
-    }
-
     let item_fields = response
         .get("fields")
         .and_then(Value::as_array)
         .cloned()
         .unwrap_or_default();
+    let mut fields = Vec::new();
+    let notes_reference = item_fields.iter().find_map(|field| {
+        let is_notes_field = string_field(field, "id")
+            .map(|value| value.eq_ignore_ascii_case("notesPlain"))
+            .unwrap_or(false)
+            || string_field(field, "purpose")
+                .map(|value| value.eq_ignore_ascii_case("NOTES"))
+                .unwrap_or(false);
+        if !is_notes_field {
+            return None;
+        }
+
+        string_field(field, "reference")
+    });
+    let has_notes_field = string_field(&response, "notesPlain")
+        .map(|notes| !notes.trim().is_empty())
+        .unwrap_or(false)
+        || notes_reference
+            .as_deref()
+            .and_then(|reference| {
+                onepassword_reference_value(program, account_id, reference).ok()
+            })
+            .map(|value| !value.trim().is_empty())
+            .unwrap_or(false);
+
+    if has_notes_field {
+        fields.push(ImportFieldOption {
+            selector: "notes".to_string(),
+            label: "notes".to_string(),
+            subtitle: Some("Secure Note".to_string()),
+            field_id: Some("notesPlain".to_string()),
+        });
+    }
 
     for field in item_fields {
         let id = string_field(&field, "id");
+        let is_notes_field = id
+            .as_deref()
+            .map(|value| value.eq_ignore_ascii_case("notesPlain"))
+            .unwrap_or(false)
+            || string_field(&field, "purpose")
+                .map(|value| value.eq_ignore_ascii_case("NOTES"))
+                .unwrap_or(false);
+        if is_notes_field {
+            continue;
+        }
         let label = string_field(&field, "label")
             .or_else(|| string_field(&field, "purpose"))
             .or_else(|| id.clone())
@@ -315,6 +346,13 @@ fn list_onepassword_fields_with_program(
     }
 
     Ok(fields)
+}
+
+fn onepassword_reference_value(program: &Path, account_id: &str, reference: &str) -> Result<String> {
+    let stdout = run_command_capture_stdout(program, &["read", reference, "--account", account_id])?;
+    String::from_utf8(stdout)
+        .map(|value| value.trim_end_matches('\n').to_string())
+        .map_err(|error| anyhow!("1Password returned non-UTF8 output: {error}"))
 }
 
 fn list_bitwarden_accounts_with_program(program: &Path) -> Result<Vec<ImportPickerOption>> {
@@ -624,26 +662,57 @@ fn infer_prefix_group(full_key: &str) -> Option<(String, String, String)> {
 }
 
 fn run_json_command(program: &Path, args: &[&str]) -> Result<Value> {
+    debug!(
+        program = %program.display(),
+        args = %args.join(" "),
+        "import browse JSON command start"
+    );
     let stdout = run_command_capture_stdout(program, args)?;
-    serde_json::from_slice(&stdout).with_context(|| {
+    let parsed = serde_json::from_slice(&stdout).with_context(|| {
         format!(
             "{} {} did not return valid JSON",
             program.display(),
             args.join(" ")
         )
-    })
+    })?;
+    debug!(
+        program = %program.display(),
+        args = %args.join(" "),
+        "import browse JSON command success"
+    );
+    Ok(parsed)
 }
 
 fn run_command_capture_stdout(program: &Path, args: &[&str]) -> Result<Vec<u8>> {
+    info!(
+        program = %program.display(),
+        args = %args.join(" "),
+        "import browse command start"
+    );
     let output = Command::new(program)
         .args(args)
         .output()
         .with_context(|| format!("failed to execute {}", program.display()))?;
 
     if !output.status.success() {
-        return Err(anyhow!(compact_process_message(&output)));
+        let message = compact_process_message(&output);
+        error!(
+            program = %program.display(),
+            args = %args.join(" "),
+            status = %output.status,
+            error = %message,
+            "import browse command failed"
+        );
+        return Err(anyhow!(message));
     }
 
+    debug!(
+        program = %program.display(),
+        args = %args.join(" "),
+        status = %output.status,
+        stdout_len = output.stdout.len(),
+        "import browse command success"
+    );
     Ok(output.stdout)
 }
 
@@ -762,7 +831,79 @@ exit 1
         assert_eq!(vaults[0].label, "Engineering");
         assert_eq!(items[0].label, "API Token");
         assert_eq!(fields[0].selector, "notes");
+        assert_eq!(fields[0].field_id.as_deref(), Some("notesPlain"));
         assert_eq!(fields[1].field_id.as_deref(), Some("field-1"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn browses_onepassword_reference_only_notes_field() {
+        let temp = tempdir().expect("temp directory should be created");
+        let op_path = temp.path().join("op");
+        write_executable(
+            op_path.as_path(),
+            r#"#!/bin/sh
+if [ "$1" = "item" ] && [ "$2" = "get" ]; then
+  cat <<'JSON'
+{"fields":[{"id":"notesPlain","type":"STRING","purpose":"NOTES","label":"notesPlain","reference":"op://vault/item/notesPlain"},{"id":"password","type":"CONCEALED","purpose":"PASSWORD","label":"password","value":"secret","reference":"op://vault/item/password"}]}
+JSON
+  exit 0
+fi
+if [ "$1" = "read" ]; then
+  printf 'note body'
+  exit 0
+fi
+echo "unexpected op invocation" >&2
+exit 1
+"#,
+        );
+
+        let fields = list_onepassword_fields_with_program(
+            op_path.as_path(),
+            "example.1password.com",
+            "vault-1",
+            "item-1",
+        )
+        .expect("field list works");
+
+        assert_eq!(fields[0].selector, "notes");
+        assert_eq!(fields[0].field_id.as_deref(), Some("notesPlain"));
+        assert_eq!(fields[1].selector, "password");
+        assert_eq!(fields.len(), 2);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn hides_empty_onepassword_reference_only_notes_field() {
+        let temp = tempdir().expect("temp directory should be created");
+        let op_path = temp.path().join("op");
+        write_executable(
+            op_path.as_path(),
+            r#"#!/bin/sh
+if [ "$1" = "item" ] && [ "$2" = "get" ]; then
+  cat <<'JSON'
+{"fields":[{"id":"notesPlain","type":"STRING","purpose":"NOTES","label":"notesPlain","reference":"op://vault/item/notesPlain"},{"id":"password","type":"CONCEALED","purpose":"PASSWORD","label":"password","value":"secret","reference":"op://vault/item/password"}]}
+JSON
+  exit 0
+fi
+if [ "$1" = "read" ]; then
+  exit 0
+fi
+echo "unexpected op invocation" >&2
+exit 1
+"#,
+        );
+
+        let fields = list_onepassword_fields_with_program(
+            op_path.as_path(),
+            "example.1password.com",
+            "vault-1",
+            "item-1",
+        )
+        .expect("field list works");
+
+        assert_eq!(fields[0].selector, "password");
+        assert_eq!(fields.len(), 1);
     }
 
     #[cfg(unix)]
