@@ -13,11 +13,12 @@ use plankton_core::{
     delete_imported_secret_reference, delete_local_secret_entry, import_secret_reference,
     import_secret_references, list_imported_secret_references, list_local_secret_catalog,
     load_settings, preview_call_chain_for_desktop, save_user_default_policy_mode,
-    save_user_settings, update_imported_secret_reference, upsert_local_secret_literal,
-    AccessRequest, DashboardData, Decision, ImportedSecretBatchReceipt, ImportedSecretCatalog,
-    ImportedSecretReceipt, ImportedSecretReferenceUpdate, LocalSecretCatalog,
-    LocalSecretLiteralEntry, LocalSecretLiteralUpsert, PlanktonSettings, PolicyMode,
-    SecretImportBatchSpec, SecretImportSpec, UserSettings,
+    save_user_locale, save_user_settings, update_imported_secret_reference,
+    upsert_local_secret_literal, AccessRequest, DashboardData, Decision,
+    ImportedSecretBatchReceipt, ImportedSecretCatalog, ImportedSecretReceipt,
+    ImportedSecretReferenceUpdate, LocalSecretCatalog, LocalSecretLiteralEntry,
+    LocalSecretLiteralUpsert, PlanktonSettings, PolicyMode, SecretImportBatchSpec,
+    SecretImportSpec, UserSettings,
 };
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, Listener, Manager, Runtime, State};
@@ -229,6 +230,15 @@ async fn save_desktop_settings(
     state: State<'_, AppState>,
 ) -> Result<UserSettings, String> {
     save_user_settings(&settings).map_err(|error| error.to_string())?;
+    reload_runtime_settings(&state)
+}
+
+#[tauri::command]
+async fn save_desktop_locale(
+    locale: String,
+    state: State<'_, AppState>,
+) -> Result<UserSettings, String> {
+    save_user_locale(&locale).map_err(|error| error.to_string())?;
     reload_runtime_settings(&state)
 }
 
@@ -466,6 +476,7 @@ fn run() -> Result<()> {
             desktop_settings,
             set_default_policy_mode,
             save_desktop_settings,
+            save_desktop_locale,
             import_secret_source,
             import_secret_sources,
             list_imported_secret_sources,

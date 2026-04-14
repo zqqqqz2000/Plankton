@@ -526,6 +526,7 @@ pub fn build_provider_input_snapshot(
         &settings.llm_advice_template,
         sanitized_context,
         policy_mode,
+        &settings.locale,
     )?;
     let prompt_sha256 = format!("{:x}", Sha256::digest(prompt.as_bytes()));
     Ok(ProviderInputSnapshot {

@@ -159,9 +159,12 @@ function areSettingsEqual(
   }
 
   return (
+    left.locale === right.locale &&
     left.default_policy_mode === right.default_policy_mode &&
     normalizeProviderKind(left.provider_kind) ===
       normalizeProviderKind(right.provider_kind) &&
+    left.request_template === right.request_template &&
+    left.llm_advice_template === right.llm_advice_template &&
     left.openai_api_base === right.openai_api_base &&
     left.openai_api_key === right.openai_api_key &&
     left.openai_model === right.openai_model &&
@@ -184,8 +187,11 @@ function getSettingsFieldLabel(
   field: keyof DesktopSettings,
 ): string {
   const labelMap: Record<keyof DesktopSettings, TranslationKey> = {
+    locale: "settingsInterfaceLocale",
     default_policy_mode: "settingsCurrentPolicy",
     provider_kind: "provider",
+    request_template: "settingsRequestTemplate",
+    llm_advice_template: "settingsLlmAdviceTemplate",
     openai_api_base: "openAiBase",
     openai_api_key: "openAiApiKey",
     openai_model: "openAiModel",
@@ -210,8 +216,11 @@ function getOverriddenSettingsFields(
   effective: DesktopSettings,
 ): Array<keyof DesktopSettings> {
   const fields: Array<keyof DesktopSettings> = [
+    "locale",
     "default_policy_mode",
     "provider_kind",
+    "request_template",
+    "llm_advice_template",
     "openai_api_base",
     "openai_api_key",
     "openai_model",
@@ -405,6 +414,7 @@ export function useDesktopApp(): UseDesktopAppResult {
       startTransition(() => {
         setState((current) => ({
           ...current,
+          locale: isLocale(loaded.locale) ? loaded.locale : current.locale,
           settings: loaded,
           settingsDraft: current.isSettingsOpen
             ? cloneSettings(loaded)
@@ -412,6 +422,9 @@ export function useDesktopApp(): UseDesktopAppResult {
           isSettingsLoading: false,
         }));
       });
+      if (isLocale(loaded.locale)) {
+        window.localStorage.setItem(LOCALE_STORAGE_KEY, loaded.locale);
+      }
     } catch (error) {
       setState((current) => ({
         ...current,
@@ -643,7 +656,43 @@ export function useDesktopApp(): UseDesktopAppResult {
       setState((current) => ({
         ...current,
         locale,
+        settings: current.settings
+          ? {
+              ...current.settings,
+              locale,
+            }
+          : current.settings,
+        settingsDraft: current.settingsDraft
+          ? {
+              ...current.settingsDraft,
+              locale,
+            }
+          : current.settingsDraft,
       }));
+      void invoke<DesktopSettings>("save_desktop_locale", { locale })
+        .then((saved) => {
+          const normalized = normalizeSettings(saved);
+          startTransition(() => {
+            setState((current) => ({
+              ...current,
+              locale: isLocale(normalized.locale) ? normalized.locale : locale,
+              settings: normalized,
+              settingsDraft:
+                current.isSettingsOpen && current.settingsDraft
+                  ? {
+                      ...current.settingsDraft,
+                      locale: normalized.locale,
+                    }
+                  : cloneSettings(normalized),
+            }));
+          });
+        })
+        .catch((error) => {
+          setState((current) => ({
+            ...current,
+            errorMessage: getErrorMessage(error),
+          }));
+        });
     },
     dismissError: () => {
       setState((current) => ({

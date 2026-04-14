@@ -24,9 +24,10 @@ pub use call_chain::{
     CallChainPreviewStatus, CallChainReadFileResult,
 };
 pub use config::{
-    load_settings, save_user_default_policy_mode, save_user_settings, user_settings_path,
+    load_settings, save_user_default_policy_mode, save_user_locale, save_user_settings,
+    user_settings_path,
     PlanktonSettings, SettingsError, SettingsPersistError, UserSettings,
-    DEFAULT_USER_PROVIDER_KIND,
+    DEFAULT_LOCALE, DEFAULT_USER_PROVIDER_KIND, SUPPORTED_LOCALES,
 };
 pub use domain::{
     AccessRequest, ApprovalStatus, AuditAction, AuditRecord, DashboardData, Decision, DomainError,

@@ -253,8 +253,11 @@ function areSettingsEqual(
   }
 
   return (
+    left.locale === right.locale &&
     left.default_policy_mode === right.default_policy_mode &&
     left.provider_kind === right.provider_kind &&
+    left.request_template === right.request_template &&
+    left.llm_advice_template === right.llm_advice_template &&
     left.openai_api_base === right.openai_api_base &&
     left.openai_api_key === right.openai_api_key &&
     left.openai_model === right.openai_model &&
@@ -274,8 +277,11 @@ function areSettingsEqual(
 
 function getSettingsFieldLabel(field: SettingsFieldKey): string {
   const labelMap: Record<SettingsFieldKey, TranslationKey> = {
+    locale: "settingsInterfaceLocale",
     default_policy_mode: "settingsCurrentPolicy",
     provider_kind: "provider",
+    request_template: "settingsRequestTemplate",
+    llm_advice_template: "settingsLlmAdviceTemplate",
     openai_api_base: "openAiBase",
     openai_api_key: "openAiApiKey",
     openai_model: "openAiModel",
@@ -300,8 +306,11 @@ function getOverriddenSettingsFields(
   effective: DesktopSettings,
 ): SettingsFieldKey[] {
   const fields: SettingsFieldKey[] = [
+    "locale",
     "default_policy_mode",
     "provider_kind",
+    "request_template",
+    "llm_advice_template",
     "openai_api_base",
     "openai_api_key",
     "openai_model",

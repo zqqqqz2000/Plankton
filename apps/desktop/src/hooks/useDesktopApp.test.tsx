@@ -35,8 +35,11 @@ type RenderHarness = {
 };
 
 const SETTINGS: DesktopSettings = {
+  locale: "en",
   default_policy_mode: "assisted",
   provider_kind: "claude",
+  request_template: "Review {{ context.resource }}",
+  llm_advice_template: "Advise on {{ context.resource }}",
   openai_api_base: "https://api.openai.test/v1",
   openai_api_key: "openai-key",
   openai_model: "gpt-5.4",
@@ -1889,15 +1892,131 @@ describe("useDesktopApp runtime wiring", () => {
       view.container.querySelector('[data-testid="workspace-grid"]'),
     ).not.toBeNull();
     expect(
+      view.container.querySelector('[data-testid="request-detail-header"]'),
+    ).not.toBeNull();
+    click(
       view.container.querySelector<HTMLButtonElement>(
-        '[data-testid="view-tab-approvals"]',
-      )?.getAttribute("aria-pressed"),
-    ).toBe("true");
+        '[data-testid="expand-approval-layout-button"]',
+      ),
+    );
+    await flushReact();
     expect(
       view.container.querySelector<HTMLButtonElement>(
         '[data-testid="queue-item"][data-request-id="req-pending-1"]',
       )?.getAttribute("data-selected"),
     ).toBe("true");
+
+    view.unmount();
+  });
+
+  it("persists locale changes through desktop settings storage", async () => {
+    tauri.listen.mockImplementation(async () => tauri.unlisten);
+    tauri.invoke.mockImplementation(async (command: string, payload?: unknown) => {
+      switch (command) {
+        case "dashboard":
+          return DASHBOARD;
+        case "desktop_settings":
+          return SETTINGS;
+        case "consume_handoff_request":
+          return null;
+        case "list_local_secret_catalog_command":
+          return EMPTY_LOCAL_SECRET_CATALOG;
+        case "save_desktop_locale":
+          expect(payload).toEqual({ locale: "zh-CN" });
+          return {
+            ...SETTINGS,
+            locale: "zh-CN",
+          };
+        default:
+          throw new Error(`Unexpected command: ${command}`);
+      }
+    });
+
+    const view = render();
+    await flushReact();
+
+    click(
+      view.container.querySelector<HTMLButtonElement>(
+        '[data-testid="locale-button-zh"]',
+      ),
+    );
+    await flushReact();
+
+    expect(window.localStorage.getItem("plankton.desktop.locale")).toBe("zh-CN");
+    expect(
+      view.container.querySelector<HTMLButtonElement>(
+        '[data-testid="locale-button-zh"]',
+      )?.getAttribute("aria-pressed"),
+    ).toBe("true");
+    expect(tauri.invoke).toHaveBeenCalledWith("save_desktop_locale", {
+      locale: "zh-CN",
+    });
+
+    view.unmount();
+  });
+
+  it("uses compact approval mode for a single pending handoff and can expand back", async () => {
+    tauri.listen.mockImplementation(async () => tauri.unlisten);
+    tauri.invoke.mockImplementation(async (command: string) => {
+      switch (command) {
+        case "dashboard":
+          return DASHBOARD;
+        case "desktop_settings":
+          return SETTINGS;
+        case "consume_handoff_request":
+          return "req-pending-1";
+        case "list_local_secret_catalog_command":
+          return EMPTY_LOCAL_SECRET_CATALOG;
+        default:
+          throw new Error(`Unexpected command: ${command}`);
+      }
+    });
+
+    const view = render();
+    await flushReact();
+    await flushReact();
+
+    expect(
+      view.container.querySelector('[data-testid="compact-mode-copy"]'),
+    ).not.toBeNull();
+    expect(
+      view.container.querySelector('[data-testid="pending-queue-panel"]'),
+    ).toBeNull();
+    expect(
+      view.container.querySelector('[data-testid="view-tab-password-management"]'),
+    ).toBeNull();
+    expect(
+      view.container.querySelector('[data-testid="global-audit-panel"]'),
+    ).toBeNull();
+    expect(
+      view.container.querySelector('[data-testid="request-audit-card"]'),
+    ).toBeNull();
+    expect(
+      view.container.querySelector('[data-testid="request-provider-runtime-card"]'),
+    ).toBeNull();
+
+    click(
+      view.container.querySelector<HTMLButtonElement>(
+        '[data-testid="expand-approval-layout-button"]',
+      ),
+    );
+    await flushReact();
+
+    expect(
+      view.container.querySelector('[data-testid="pending-queue-panel"]'),
+    ).not.toBeNull();
+    expect(
+      view.container.querySelector('[data-testid="view-tab-password-management"]'),
+    ).not.toBeNull();
+    expect(
+      view.container.querySelector('[data-testid="global-audit-panel"]'),
+    ).not.toBeNull();
+    expect(
+      view.container.querySelector('[data-testid="request-audit-card"]'),
+    ).not.toBeNull();
+    expect(
+      view.container.querySelector('[data-testid="request-provider-runtime-card"]'),
+    ).not.toBeNull();
 
     view.unmount();
   });

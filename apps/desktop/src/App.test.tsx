@@ -27,8 +27,11 @@ Object.assign(globalThis, {
 });
 
 const BASE_SETTINGS: DesktopSettings = {
+  locale: "en",
   default_policy_mode: "assisted",
   provider_kind: "claude",
+  request_template: "Review {{ context.resource }}",
+  llm_advice_template: "Advise on {{ context.resource }}",
   openai_api_base: "https://api.openai.test/v1",
   openai_api_key: "openai-key",
   openai_model: "gpt-5.4",

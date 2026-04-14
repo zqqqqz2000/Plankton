@@ -14,12 +14,15 @@ use crate::template::{
 use crate::PolicyMode;
 
 pub const DEFAULT_USER_PROVIDER_KIND: &str = "acp";
+pub const DEFAULT_LOCALE: &str = "en";
+pub const SUPPORTED_LOCALES: [&str; 2] = ["en", "zh-CN"];
 const DEFAULT_ACP_PROGRAM: &str = "npx";
 const DEFAULT_ACP_ARGS: &str = "-y @zed-industries/codex-acp@0.11.1";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PlanktonSettings {
     pub database_url: String,
+    pub locale: String,
     pub default_policy_mode: PolicyMode,
     pub provider_kind: String,
     pub request_template: String,
@@ -44,8 +47,11 @@ pub struct PlanktonSettings {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct UserSettings {
+    pub locale: String,
     pub default_policy_mode: PolicyMode,
     pub provider_kind: String,
+    pub request_template: String,
+    pub llm_advice_template: String,
     pub openai_api_base: String,
     pub openai_api_key: String,
     pub openai_model: String,
@@ -66,6 +72,7 @@ impl Default for PlanktonSettings {
     fn default() -> Self {
         Self {
             database_url: default_database_url(),
+            locale: DEFAULT_LOCALE.to_string(),
             default_policy_mode: PolicyMode::ManualOnly,
             provider_kind: DEFAULT_USER_PROVIDER_KIND.to_string(),
             request_template: DEFAULT_REQUEST_TEMPLATE.to_string(),
@@ -93,8 +100,11 @@ impl Default for PlanktonSettings {
 impl From<&PlanktonSettings> for UserSettings {
     fn from(settings: &PlanktonSettings) -> Self {
         Self {
+            locale: settings.locale.clone(),
             default_policy_mode: settings.default_policy_mode,
             provider_kind: settings.provider_kind.clone(),
+            request_template: settings.request_template.clone(),
+            llm_advice_template: settings.llm_advice_template.clone(),
             openai_api_base: settings.openai_api_base.clone(),
             openai_api_key: settings.openai_api_key.clone(),
             openai_model: settings.openai_model.clone(),
@@ -116,8 +126,11 @@ impl From<&PlanktonSettings> for UserSettings {
 impl UserSettings {
     fn normalized(&self) -> Self {
         Self {
+            locale: normalize_locale_value(&self.locale).to_string(),
             default_policy_mode: self.default_policy_mode,
             provider_kind: canonicalize_provider_kind(&self.provider_kind),
+            request_template: self.request_template.clone(),
+            llm_advice_template: self.llm_advice_template.clone(),
             openai_api_base: self.openai_api_base.trim().to_string(),
             openai_api_key: self.openai_api_key.clone(),
             openai_model: self.openai_model.trim().to_string(),
@@ -172,6 +185,7 @@ fn load_settings_from_path(
     let defaults = PlanktonSettings::default();
     let mut builder = Config::builder()
         .set_default("database_url", defaults.database_url.clone())?
+        .set_default("locale", defaults.locale.clone())?
         .set_default(
             "default_policy_mode",
             policy_mode_to_string(defaults.default_policy_mode),
@@ -217,6 +231,7 @@ fn load_settings_from_path(
     apply_generic_acp_config_aliases(acp_program_alias, acp_args_alias, &mut settings);
     apply_env_overrides(&mut settings);
     normalize_user_provider_kind(&mut settings);
+    normalize_locale(&mut settings);
 
     Ok(settings)
 }
@@ -238,6 +253,10 @@ pub fn save_user_default_policy_mode(
     policy_mode: PolicyMode,
 ) -> Result<PathBuf, SettingsPersistError> {
     save_user_default_policy_mode_to_path(user_settings_path().as_path(), policy_mode)
+}
+
+pub fn save_user_locale(locale: &str) -> Result<PathBuf, SettingsPersistError> {
+    save_user_locale_to_path(user_settings_path().as_path(), locale)
 }
 
 pub fn save_user_settings(settings: &UserSettings) -> Result<PathBuf, SettingsPersistError> {
@@ -262,6 +281,12 @@ fn apply_env_overrides(settings: &mut PlanktonSettings) {
     if let Ok(policy_mode) = std::env::var("PLANKTON_DEFAULT_POLICY_MODE") {
         if let Some(policy_mode) = parse_policy_mode(policy_mode.as_str()) {
             settings.default_policy_mode = policy_mode;
+        }
+    }
+
+    if let Ok(locale) = std::env::var("PLANKTON_LOCALE") {
+        if !locale.trim().is_empty() {
+            settings.locale = locale;
         }
     }
 
@@ -389,6 +414,18 @@ fn normalize_user_provider_kind(settings: &mut PlanktonSettings) {
     }
 }
 
+fn normalize_locale(settings: &mut PlanktonSettings) {
+    settings.locale = normalize_locale_value(&settings.locale).to_string();
+}
+
+fn normalize_locale_value(value: &str) -> &'static str {
+    match value.trim() {
+        "zh-CN" | "zh-cn" | "zh_CN" | "zh" => "zh-CN",
+        "en" | "en-US" | "en-us" => "en",
+        _ => DEFAULT_LOCALE,
+    }
+}
+
 fn apply_generic_acp_config_aliases(
     acp_program: Option<String>,
     acp_args: Option<String>,
@@ -439,6 +476,14 @@ fn save_user_default_policy_mode_to_path(
     write_user_settings_document(path, &document)
 }
 
+fn save_user_locale_to_path(path: &Path, locale: &str) -> Result<PathBuf, SettingsPersistError> {
+    let normalized = normalize_locale_value(locale);
+    let mut document = read_user_settings_document(path)?;
+    let table = root_table(&mut document);
+    table.insert("locale".to_string(), TomlValue::String(normalized.to_string()));
+    write_user_settings_document(path, &document)
+}
+
 fn save_user_settings_to_path(
     path: &Path,
     settings: &UserSettings,
@@ -448,6 +493,7 @@ fn save_user_settings_to_path(
 
     let mut document = read_user_settings_document(path)?;
     let table = root_table(&mut document);
+    table.insert("locale".to_string(), TomlValue::String(normalized.locale));
     table.insert(
         "default_policy_mode".to_string(),
         TomlValue::String(policy_mode_to_string(normalized.default_policy_mode)),
@@ -455,6 +501,14 @@ fn save_user_settings_to_path(
     table.insert(
         "provider_kind".to_string(),
         TomlValue::String(normalized.provider_kind),
+    );
+    table.insert(
+        "request_template".to_string(),
+        TomlValue::String(normalized.request_template),
+    );
+    table.insert(
+        "llm_advice_template".to_string(),
+        TomlValue::String(normalized.llm_advice_template),
     );
     table.insert(
         "openai_api_base".to_string(),
@@ -555,6 +609,13 @@ fn root_table(document: &mut TomlValue) -> &mut toml::map::Map<String, TomlValue
 }
 
 fn validate_user_settings(settings: &UserSettings) -> Result<(), SettingsPersistError> {
+    if !SUPPORTED_LOCALES.contains(&settings.locale.as_str()) {
+        return Err(SettingsPersistError::InvalidField {
+            field: "locale",
+            reason: "must be one of en or zh-CN",
+        });
+    }
+
     if settings.provider_kind.is_empty() {
         return Err(SettingsPersistError::InvalidField {
             field: "provider_kind",
@@ -629,8 +690,9 @@ fn policy_mode_to_string(value: PolicyMode) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        load_settings_from_path, save_user_default_policy_mode_to_path, save_user_settings_to_path,
-        PolicyMode, SettingsPersistError, UserSettings, DEFAULT_USER_PROVIDER_KIND,
+        load_settings_from_path, save_user_default_policy_mode_to_path, save_user_locale_to_path,
+        save_user_settings_to_path, PolicyMode, SettingsPersistError, UserSettings,
+        DEFAULT_USER_PROVIDER_KIND,
     };
 
     fn temp_settings_path(test_name: &str) -> std::path::PathBuf {
@@ -652,8 +714,11 @@ mod tests {
         .expect("seed settings file should be written");
 
         let settings = UserSettings {
+            locale: "zh-CN".to_string(),
             default_policy_mode: PolicyMode::Assisted,
             provider_kind: "claude".to_string(),
+            request_template: "review {{ context.resource }}".to_string(),
+            llm_advice_template: "advise {{ context.resource }}".to_string(),
             openai_api_base: "https://example.com/openai".to_string(),
             openai_api_key: "openai-key".to_string(),
             openai_model: "gpt-test".to_string(),
@@ -674,7 +739,9 @@ mod tests {
 
         let written = std::fs::read_to_string(&path).expect("settings file should be readable");
         assert!(written.contains("recent_audit_limit = 42"));
-        assert!(written.contains("request_template = \"keep-me\""));
+        assert!(written.contains("locale = \"zh-CN\""));
+        assert!(written.contains("request_template = \"review {{ context.resource }}\""));
+        assert!(written.contains("llm_advice_template = \"advise {{ context.resource }}\""));
         assert!(written.contains("provider_kind = \"claude\""));
         assert!(written.contains("claude_timeout_secs = 45"));
         assert!(written.contains("acp_program = \"npx\""));
@@ -689,8 +756,11 @@ mod tests {
     fn loads_saved_user_settings_from_custom_path() {
         let path = temp_settings_path("load-saved-user-settings");
         let settings = UserSettings {
+            locale: "zh-CN".to_string(),
             default_policy_mode: PolicyMode::LlmAutomatic,
             provider_kind: "openai_compatible".to_string(),
+            request_template: "review".to_string(),
+            llm_advice_template: "advise".to_string(),
             openai_api_base: "https://openai.example/v1".to_string(),
             openai_api_key: "sk-test".to_string(),
             openai_model: "gpt-5.4-mini".to_string(),
@@ -712,7 +782,10 @@ mod tests {
             load_settings_from_path(&path, false).expect("settings should load from custom path");
 
         assert_eq!(loaded.default_policy_mode, PolicyMode::LlmAutomatic);
+        assert_eq!(loaded.locale, "zh-CN");
         assert_eq!(loaded.provider_kind, "openai_compatible");
+        assert_eq!(loaded.request_template, "review");
+        assert_eq!(loaded.llm_advice_template, "advise");
         assert_eq!(loaded.openai_model, "gpt-5.4-mini");
         assert_eq!(loaded.openai_temperature, 0.7);
         assert_eq!(loaded.claude_timeout_secs, 90);
@@ -736,6 +809,23 @@ mod tests {
 
         assert_eq!(loaded.default_policy_mode, PolicyMode::Assisted);
         assert_eq!(loaded.provider_kind, DEFAULT_USER_PROVIDER_KIND);
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn saves_locale_without_touching_other_settings() {
+        let path = temp_settings_path("save-locale");
+        std::fs::create_dir_all(path.parent().expect("temp parent should exist"))
+            .expect("temp parent should be created");
+        std::fs::write(&path, "provider_kind = \"claude\"\n")
+            .expect("seed settings should exist");
+
+        save_user_locale_to_path(&path, "zh").expect("locale should persist");
+        let written = std::fs::read_to_string(&path).expect("settings file should be readable");
+
+        assert!(written.contains("locale = \"zh-CN\""));
+        assert!(written.contains("provider_kind = \"claude\""));
 
         let _ = std::fs::remove_file(&path);
     }

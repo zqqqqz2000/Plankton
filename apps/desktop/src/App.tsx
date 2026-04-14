@@ -1297,6 +1297,8 @@ export function PendingRequestDetail(props: {
   lastUpdatedAt: string | null;
   isSubmitting: boolean;
   recentAuditRecords: AuditRecord[];
+  showAudit?: boolean;
+  showProviderDiagnostics?: boolean;
   onNoteChange: (value: string) => void;
   onDecide: (
     requestId: string,
@@ -1337,6 +1339,8 @@ export function PendingRequestDetail(props: {
     suggestionTrace?.provider_kind ??
     request.automatic_decision?.provider_kind ??
     request.provider_kind;
+  const showAudit = props.showAudit ?? true;
+  const showProviderDiagnostics = props.showProviderDiagnostics ?? true;
 
   return (
     <>
@@ -1485,39 +1489,47 @@ export function PendingRequestDetail(props: {
           locale={props.locale}
           suggestion={request.llm_suggestion}
         />
-        <AcpTraceCard locale={props.locale} trace={suggestionTrace} />
-        <ClaudeTraceCard locale={props.locale} trace={suggestionTrace} />
+        {showProviderDiagnostics ? (
+          <AcpTraceCard locale={props.locale} trace={suggestionTrace} />
+        ) : null}
+        {showProviderDiagnostics ? (
+          <ClaudeTraceCard locale={props.locale} trace={suggestionTrace} />
+        ) : null}
         <ContextCard locale={props.locale} request={request} />
-        <section
-          className="detail-section detail-section-wide"
-          data-testid="request-audit-card"
-        >
-          <div
-            className="detail-section-header"
-            data-testid="request-audit-card-header"
+        {showAudit ? (
+          <section
+            className="detail-section detail-section-wide"
+            data-testid="request-audit-card"
           >
-            <h3>{text(props.locale, "requestAudit")}</h3>
-            <span data-testid="request-audit-count">
-              {text(props.locale, "eventCount", {
-                count: selectedAuditRecords.length,
-              })}
-            </span>
-          </div>
-          <AuditList
-            emptyMessage={text(props.locale, "noRequestAudit")}
+            <div
+              className="detail-section-header"
+              data-testid="request-audit-card-header"
+            >
+              <h3>{text(props.locale, "requestAudit")}</h3>
+              <span data-testid="request-audit-count">
+                {text(props.locale, "eventCount", {
+                  count: selectedAuditRecords.length,
+                })}
+              </span>
+            </div>
+            <AuditList
+              emptyMessage={text(props.locale, "noRequestAudit")}
+              locale={props.locale}
+              records={selectedAuditRecords}
+              testId="request-audit-list"
+            />
+          </section>
+        ) : null}
+        {showProviderDiagnostics ? (
+          <ProviderRuntimeCard
+            actualProviderKind={actualProviderKind}
+            configuredProviderKind={props.settings?.provider_kind ?? null}
             locale={props.locale}
-            records={selectedAuditRecords}
-            testId="request-audit-list"
+            providerCalled={providerCalled}
+            providerTrace={suggestionTrace?.provider_trace ?? null}
+            testIdPrefix="request"
           />
-        </section>
-        <ProviderRuntimeCard
-          actualProviderKind={actualProviderKind}
-          configuredProviderKind={props.settings?.provider_kind ?? null}
-          locale={props.locale}
-          providerCalled={providerCalled}
-          providerTrace={suggestionTrace?.provider_trace ?? null}
-          testIdPrefix="request"
-        />
+        ) : null}
       </div>
     </>
   );
@@ -2412,6 +2424,36 @@ export function SettingsModal(props: {
             >
               <p>{text(props.locale, "settingsEnvOverrideHelp")}</p>
             </div>
+            <div className="settings-form-grid">
+              <SettingsField
+                disabled={disabled}
+                field="request_template"
+                labelText={text(props.locale, "settingsRequestTemplate")}
+                onChange={(value) => {
+                  props.onFieldChange("request_template", value);
+                }}
+                textarea
+                type="text"
+                value={props.settingsDraft?.request_template ?? ""}
+              />
+              <SettingsField
+                disabled={disabled}
+                field="llm_advice_template"
+                labelText={text(props.locale, "settingsLlmAdviceTemplate")}
+                onChange={(value) => {
+                  props.onFieldChange("llm_advice_template", value);
+                }}
+                textarea
+                type="text"
+                value={props.settingsDraft?.llm_advice_template ?? ""}
+              />
+            </div>
+            <div
+              className="settings-placeholder"
+              data-testid="settings-template-variables-help"
+            >
+              <p>{text(props.locale, "settingsTemplateVariables")}</p>
+            </div>
           </section>
         </div>
 
@@ -2436,6 +2478,7 @@ export function SettingsModal(props: {
 
 export default function App(): JSX.Element {
   const [activeView, setActiveView] = useState<AppView>("approvals");
+  const [isCompactModeDismissed, setIsCompactModeDismissed] = useState(false);
   const {
     state,
     canSaveSettings,
@@ -2493,9 +2536,17 @@ export default function App(): JSX.Element {
     }
 
     setActiveView("approvals");
+    setIsCompactModeDismissed(false);
   }, [state.lastHandoffRequestId]);
 
   const isApprovalView = activeView === "approvals";
+  const isCompactApprovalView =
+    isApprovalView &&
+    !isCompactModeDismissed &&
+    Boolean(state.lastHandoffRequestId) &&
+    summary.pendingCount === 1 &&
+    state.selectedDetail?.kind === "pending_request" &&
+    selectedRequest?.id === state.lastHandoffRequestId;
   const toolbarHeading = isApprovalView
     ? text(state.locale, "toolbarTitle")
     : text(state.locale, "passwordManagement");
@@ -2528,6 +2579,8 @@ export default function App(): JSX.Element {
       recentAuditRecords={state.dashboard?.recent_audit_records ?? []}
       request={selectedRequest}
       settings={state.settings}
+      showAudit={!isCompactApprovalView}
+      showProviderDiagnostics={!isCompactApprovalView}
     />
   );
 
@@ -2539,6 +2592,7 @@ export default function App(): JSX.Element {
           : "false"
       }
       className="shell min-h-screen"
+      data-approval-layout={isCompactApprovalView ? "compact" : "full"}
       data-testid="approval-console"
       data-ui-state={uiState}
     >
@@ -2546,7 +2600,7 @@ export default function App(): JSX.Element {
         <div className="toolbar-title">
           <div className="toolbar-heading">
             <h1>{toolbarHeading}</h1>
-            {isApprovalView ? (
+            {isApprovalView && !isCompactApprovalView ? (
               <span
                 className="toolbar-count"
                 data-queue-count={summary.pendingCount}
@@ -2558,37 +2612,55 @@ export default function App(): JSX.Element {
               </span>
             ) : null}
           </div>
-          <div
-            aria-label={text(state.locale, "toolbarTitle")}
-            className="toolbar-nav"
-            data-testid="app-view-switcher"
-            role="group"
-          >
-            <button
-              aria-pressed={isApprovalView ? "true" : "false"}
-              className={`ghost toolbar-tab ${isApprovalView ? "active" : ""}`}
-              data-testid="view-tab-approvals"
-              onClick={() => {
-                setActiveView("approvals");
-              }}
-              type="button"
+          {!isCompactApprovalView ? (
+            <div
+              aria-label={text(state.locale, "toolbarTitle")}
+              className="toolbar-nav"
+              data-testid="app-view-switcher"
+              role="group"
             >
-              {text(state.locale, "approvalsTab")}
-            </button>
-            <button
-              aria-pressed={!isApprovalView ? "true" : "false"}
-              className={`ghost toolbar-tab ${!isApprovalView ? "active" : ""}`}
-              data-testid="view-tab-password-management"
-              onClick={() => {
-                setActiveView("password_management");
-              }}
-              type="button"
-            >
-              {text(state.locale, "passwordManagement")}
-            </button>
-          </div>
+              <button
+                aria-pressed={isApprovalView ? "true" : "false"}
+                className={`ghost toolbar-tab ${isApprovalView ? "active" : ""}`}
+                data-testid="view-tab-approvals"
+                onClick={() => {
+                  setActiveView("approvals");
+                }}
+                type="button"
+              >
+                {text(state.locale, "approvalsTab")}
+              </button>
+              <button
+                aria-pressed={!isApprovalView ? "true" : "false"}
+                className={`ghost toolbar-tab ${!isApprovalView ? "active" : ""}`}
+                data-testid="view-tab-password-management"
+                onClick={() => {
+                  setActiveView("password_management");
+                }}
+                type="button"
+              >
+                {text(state.locale, "passwordManagement")}
+              </button>
+            </div>
+          ) : (
+            <p className="toolbar-compact-copy" data-testid="compact-mode-copy">
+              {text(state.locale, "compactApprovalMode")}
+            </p>
+          )}
         </div>
         <div className="toolbar-actions">
+          {isCompactApprovalView ? (
+            <button
+              className="ghost"
+              data-testid="expand-approval-layout-button"
+              onClick={() => {
+                setIsCompactModeDismissed(true);
+              }}
+              type="button"
+            >
+              {text(state.locale, "expandFullView")}
+            </button>
+          ) : null}
           <button
             className="ghost"
             data-testid="open-settings-button"
@@ -2701,12 +2773,16 @@ export default function App(): JSX.Element {
 
       {isApprovalView ? (
         <>
-          <section className="workspace-grid" data-testid="workspace-grid">
-            <aside
-              className="panel queue-panel"
-              data-testid="pending-queue-panel"
-            >
-              <div className="panel-stack" data-testid="sidebar-stack">
+          <section
+            className={`workspace-grid${isCompactApprovalView ? " workspace-grid-compact" : ""}`}
+            data-testid="workspace-grid"
+          >
+            {!isCompactApprovalView ? (
+              <aside
+                className="panel queue-panel"
+                data-testid="pending-queue-panel"
+              >
+                <div className="panel-stack" data-testid="sidebar-stack">
                 <section
                   className="panel-section"
                   data-testid="pending-queue-section"
@@ -2987,11 +3063,12 @@ export default function App(): JSX.Element {
                     )}
                   </div>
                 </section>
-              </div>
-            </aside>
+                </div>
+              </aside>
+            ) : null}
 
             <section
-              className="panel detail-panel"
+              className={`panel detail-panel${isCompactApprovalView ? " detail-panel-compact" : ""}`}
               data-detail-kind={state.selectedDetail?.kind ?? "empty"}
               data-policy-mode={
                 selectedRequest?.policy_mode ??
@@ -3010,21 +3087,23 @@ export default function App(): JSX.Element {
             </section>
           </section>
 
-          <section
-            className="panel audit-panel"
-            data-testid="global-audit-panel"
-          >
-            <div className="panel-header" data-testid="global-audit-header">
-              <h2>{text(state.locale, "audit")}</h2>
-              <span data-testid="global-audit-count">{summary.auditCount}</span>
-            </div>
-            <AuditList
-              emptyMessage={text(state.locale, "noAuditEvents")}
-              locale={state.locale}
-              records={state.dashboard?.recent_audit_records ?? []}
-              testId="global-audit-list"
-            />
-          </section>
+          {!isCompactApprovalView ? (
+            <section
+              className="panel audit-panel"
+              data-testid="global-audit-panel"
+            >
+              <div className="panel-header" data-testid="global-audit-header">
+                <h2>{text(state.locale, "audit")}</h2>
+                <span data-testid="global-audit-count">{summary.auditCount}</span>
+              </div>
+              <AuditList
+                emptyMessage={text(state.locale, "noAuditEvents")}
+                locale={state.locale}
+                records={state.dashboard?.recent_audit_records ?? []}
+                testId="global-audit-list"
+              />
+            </section>
+          ) : null}
         </>
       ) : (
         <PasswordManagementView locale={state.locale} />

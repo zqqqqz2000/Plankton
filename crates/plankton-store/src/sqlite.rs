@@ -86,8 +86,12 @@ impl SqliteStore {
     ) -> Result<AccessRequest, StoreError> {
         let sanitized_context = sanitize_prompt_context(&context);
         let stored_context = sanitize_request_context_for_storage(&context);
-        let rendered_prompt =
-            render_request_template(&settings.request_template, &sanitized_context, policy_mode)?;
+        let rendered_prompt = render_request_template(
+            &settings.request_template,
+            &sanitized_context,
+            policy_mode,
+            &settings.locale,
+        )?;
         let normalized_provider_kind = normalized_provider_kind(settings);
         let (provider_kind, provider_input, llm_suggestion, automatic_decision) = match policy_mode
         {

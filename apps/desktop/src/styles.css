@@ -111,6 +111,12 @@ button:disabled {
   margin-left: auto;
 }
 
+.toolbar-compact-copy {
+  margin: 0;
+  font-size: 0.78rem;
+  color: var(--color-text-muted);
+}
+
 .toolbar h1,
 .panel-header h2,
 .detail-header h2,
@@ -176,6 +182,12 @@ button:disabled {
   align-items: start;
 }
 
+.workspace-grid-compact {
+  grid-template-columns: minmax(0, 1fr);
+  max-width: 920px;
+  margin: 0 auto;
+}
+
 .queue-list {
   display: grid;
   gap: 0;
@@ -235,6 +247,12 @@ button:disabled {
 
 .detail-panel {
   min-height: 0;
+}
+
+.detail-panel-compact {
+  max-width: 920px;
+  width: 100%;
+  margin: 0 auto;
 }
 
 .detail-empty-state {

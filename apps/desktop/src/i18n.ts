@@ -20,6 +20,8 @@ const MESSAGES = {
     syncReady: "Ready",
     syncWaiting: "Waiting",
     refresh: "Refresh",
+    compactApprovalMode: "Focused review mode for the latest request",
+    expandFullView: "Expand Full View",
     settings: "Settings",
     close: "Close",
     save: "Save",
@@ -43,7 +45,7 @@ const MESSAGES = {
       "Choose how new requests should route by default in the desktop experience.",
     settingsLlmTitle: "LLM Behavior",
     settingsLlmHelp:
-      "Provider and AI behavior controls are saved into desktop settings without exposing prompt or template internals.",
+      "Provider behavior and prompt templates are saved into desktop settings, and templates can use the persisted locale and i18n helpers.",
     settingsProviderTitle: "Provider",
     settingsProviderHelp:
       "Select which provider path the desktop should use for new AI-assisted or automatic requests.",
@@ -67,6 +69,11 @@ const MESSAGES = {
       "Runtime `PLANKTON_*` environment variables still win over saved desktop settings.",
     settingsEnvOverrideDetected:
       "These fields are currently overridden by runtime environment variables: {fields}",
+    settingsInterfaceLocale: "Interface Locale",
+    settingsRequestTemplate: "Review Template",
+    settingsLlmAdviceTemplate: "LLM Advice Template",
+    settingsTemplateVariables:
+      "Template variables: {{ locale }}, {{ i18n.resource_label }}, {{ i18n.resource_tags_label }}, {{ i18n.metadata_label }}, {{ context.resource }}, {{ context.resource_tags }}, {{ context.metadata }}, {{ policy_mode }}, {{ prompt_contract_version }}.",
     settingsCurrentPolicy: "Current Default",
     policyHumanReviewDesc:
       "Always hand off to a human reviewer in the desktop queue.",
@@ -273,6 +280,8 @@ const MESSAGES = {
     syncReady: "已同步",
     syncWaiting: "等待中",
     refresh: "刷新",
+    compactApprovalMode: "聚焦当前最新申请的小窗模式",
+    expandFullView: "展开完整视图",
     settings: "设置",
     close: "关闭",
     save: "保存",
@@ -295,7 +304,7 @@ const MESSAGES = {
     settingsPolicyHelp: "选择桌面端默认如何承接新请求。",
     settingsLlmTitle: "LLM 行为",
     settingsLlmHelp:
-      "Provider 与 AI 行为相关配置会写入 desktop settings，但不会重新暴露 Prompt 或模板内部项。",
+      "Provider 行为和 Prompt 模板会写入 desktop settings，模板可以直接使用持久化 locale 和 i18n 变量。",
     settingsProviderTitle: "Provider",
     settingsProviderHelp:
       "选择桌面端处理 AI 辅助或自动决策请求时使用的 provider 路径。",
@@ -318,6 +327,11 @@ const MESSAGES = {
     settingsEnvOverrideHelp:
       "运行时如果存在 `PLANKTON_*` 环境变量，它们仍会覆盖保存到 desktop settings 里的值。",
     settingsEnvOverrideDetected: "这些字段当前被运行时环境变量覆盖：{fields}",
+    settingsInterfaceLocale: "界面语言",
+    settingsRequestTemplate: "审批模板",
+    settingsLlmAdviceTemplate: "LLM 建议模板",
+    settingsTemplateVariables:
+      "模板变量：{{ locale }}、{{ i18n.resource_label }}、{{ i18n.resource_tags_label }}、{{ i18n.metadata_label }}、{{ context.resource }}、{{ context.resource_tags }}、{{ context.metadata }}、{{ policy_mode }}、{{ prompt_contract_version }}。",
     settingsCurrentPolicy: "当前默认策略",
     policyHumanReviewDesc: "所有新请求默认进入人工审批队列。",
     policyAssistDesc: "先展示 AI 建议，再由人工审批者做最终决定。",

@@ -123,8 +123,11 @@ export type DashboardData = {
 export type DecisionCommand = "approve_request" | "reject_request";
 
 export type DesktopSettings = {
+  locale: string;
   default_policy_mode: string;
   provider_kind: string;
+  request_template: string;
+  llm_advice_template: string;
   openai_api_base: string;
   openai_api_key: string;
   openai_model: string;
