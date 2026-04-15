@@ -76,6 +76,8 @@ pub struct ImportedSecretReference {
     pub tags: Vec<String>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub metadata: BTreeMap<String, String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub value: Option<String>,
     #[serde(flatten)]
     pub source_locator: SecretSourceLocator,
     pub imported_at: DateTime<Utc>,
@@ -551,9 +553,13 @@ impl LocalSecretCatalogResolver {
                     Ok(value.clone())
                 }
             }
-            SecretCatalogEntry::Imported(reference) => {
-                resolve_imported_reference(reference, resource, programs)
-            }
+            SecretCatalogEntry::Imported(reference) => match reference.value.as_deref() {
+                Some(value) if !value.is_empty() => Ok(value.to_string()),
+                Some(_) => Err(ValueResolverError::EmptyValue {
+                    resource: resource.to_string(),
+                }),
+                None => resolve_imported_reference(reference, resource, programs),
+            },
         }
     }
 }
@@ -756,6 +762,12 @@ pub fn update_imported_secret_reference(
     update_imported_secret_reference_at(local_secret_catalog_path().as_path(), update)
 }
 
+pub fn refresh_imported_secret_reference(
+    resource: &str,
+) -> Result<ImportedSecretReceipt, SecretImportError> {
+    refresh_imported_secret_reference_at(local_secret_catalog_path().as_path(), resource)
+}
+
 pub fn update_imported_secret_reference_at(
     path: &Path,
     update: ImportedSecretReferenceUpdate,
@@ -792,6 +804,17 @@ pub fn update_imported_secret_reference_at(
         catalog_path: path.to_path_buf(),
         reference: updated,
     })
+}
+
+pub fn refresh_imported_secret_reference_at(
+    path: &Path,
+    resource: &str,
+) -> Result<ImportedSecretReceipt, SecretImportError> {
+    refresh_imported_secret_reference_at_with_programs(
+        path,
+        resource,
+        &VendorCliPrograms::from_env(),
+    )
 }
 
 pub fn delete_imported_secret_reference(resource: &str) -> Result<bool, SecretImportError> {
@@ -863,6 +886,15 @@ fn import_secret_reference_at_with_programs(
         .ok_or(SecretImportError::EmptyBatch)
 }
 
+#[cfg(test)]
+fn refresh_imported_secret_reference_at_with_programs_for_test(
+    path: &Path,
+    resource: &str,
+    programs: &VendorCliPrograms,
+) -> Result<ImportedSecretReceipt, SecretImportError> {
+    refresh_imported_secret_reference_at_with_programs(path, resource, programs)
+}
+
 fn import_secret_references_at_with_programs(
     path: &Path,
     spec: SecretImportBatchSpec,
@@ -920,6 +952,44 @@ fn import_secret_references_at_with_programs(
     })
 }
 
+fn refresh_imported_secret_reference_at_with_programs(
+    path: &Path,
+    resource: &str,
+    programs: &VendorCliPrograms,
+) -> Result<ImportedSecretReceipt, SecretImportError> {
+    let resource = resource.trim();
+    if resource.is_empty() {
+        return Err(SecretImportError::MissingResource);
+    }
+
+    let mut catalog = load_secret_catalog_file_optional(path)?;
+    let reference = catalog
+        .imports
+        .iter_mut()
+        .find(|reference| reference.resource == resource)
+        .ok_or_else(|| SecretImportError::ImportedResourceNotFound {
+            resource: resource.to_string(),
+        })?;
+
+    let value = resolve_imported_reference(reference, resource, programs).map_err(|source| {
+        SecretImportError::VerifySource {
+            resource: resource.to_string(),
+            source,
+        }
+    })?;
+    let now = Utc::now();
+    reference.value = Some(value);
+    reference.last_verified_at = Some(now);
+
+    let updated = reference.clone();
+    save_secret_catalog_file(path, &catalog)?;
+
+    Ok(ImportedSecretReceipt {
+        catalog_path: path.to_path_buf(),
+        reference: updated,
+    })
+}
+
 fn build_import_reference(
     spec: SecretImportSpec,
     resource_template: Option<&str>,
@@ -949,17 +1019,19 @@ fn build_import_reference(
         description,
         tags,
         metadata,
+        value: None,
         source_locator: spec.source_locator,
         imported_at: now,
         last_verified_at: None,
     };
 
-    resolve_imported_reference(&reference, resource.as_str(), programs).map_err(|source| {
-        SecretImportError::VerifySource {
+    let value = resolve_imported_reference(&reference, resource.as_str(), programs).map_err(
+        |source| SecretImportError::VerifySource {
             resource: resource.clone(),
             source,
-        }
-    })?;
+        },
+    )?;
+    reference.value = Some(value);
     reference.last_verified_at = Some(now);
 
     Ok(reference)
@@ -1794,6 +1866,7 @@ mod tests {
         default_value_resolver, delete_imported_secret_reference_at,
         import_secret_reference_at_with_programs, import_secret_references_at_with_programs,
         list_imported_secret_references_at, list_local_secret_catalog_at,
+        refresh_imported_secret_reference_at_with_programs_for_test,
         update_imported_secret_reference_at, upsert_local_secret_literal_at,
         ImportedSecretReferenceUpdate, LocalSecretCatalogResolver,
         LocalSecretLiteralUpsert, SecretImportBatchSpec, SecretImportSpec,
@@ -1857,7 +1930,7 @@ mod tests {
     }
 
     #[test]
-    fn dotenv_import_writes_reference_without_persisting_secret_value() {
+    fn dotenv_import_persists_secret_value_snapshot() {
         let temp = tempdir().expect("temp directory should be created");
         let env_path = temp.path().join(".env");
         let catalog_path = temp.path().join("catalog.toml");
@@ -1888,6 +1961,7 @@ mod tests {
             fs::read_to_string(catalog_path.as_path()).expect("catalog should be readable");
 
         assert_eq!(receipt.reference.provider_kind(), DOTENV_FILE_PROVIDER_KIND);
+        assert_eq!(receipt.reference.value.as_deref(), Some("demo-value"));
         assert!(receipt.reference.last_verified_at.is_some());
         assert_eq!(
             receipt.reference.metadata.get("owner").map(String::as_str),
@@ -1901,7 +1975,7 @@ mod tests {
         );
         assert_eq!(resolver.list_resources(), vec!["secret/demo".to_string()]);
         assert!(catalog_content.contains("provider_kind = \"dotenv_file\""));
-        assert!(!catalog_content.contains("demo-value"));
+        assert!(catalog_content.contains("value = \"demo-value\""));
     }
 
     #[test]
@@ -1934,7 +2008,7 @@ mod tests {
     }
 
     #[test]
-    fn batch_import_uses_shared_template_without_persisting_secret_values() {
+    fn batch_import_uses_shared_template_and_persists_secret_values() {
         let temp = tempdir().expect("temp directory should be created");
         let env_path = temp.path().join(".env");
         let catalog_path = temp.path().join("catalog.toml");
@@ -2002,8 +2076,8 @@ mod tests {
                 "config/svc/beta".to_string(),
             ]
         );
-        assert!(!catalog_content.contains("alpha-secret"));
-        assert!(!catalog_content.contains("beta-secret"));
+        assert!(catalog_content.contains("value = \"alpha-secret\""));
+        assert!(catalog_content.contains("value = \"beta-secret\""));
     }
 
     #[test]
@@ -2182,6 +2256,7 @@ mod tests {
             .expect("catalog should list imports");
         assert_eq!(listed.imports.len(), 1);
         assert_eq!(listed.imports[0].resource, "secret/demo");
+        assert_eq!(listed.imports[0].value.as_deref(), Some("demo-value"));
         assert_eq!(
             listed.imports[0].metadata.get("team").map(String::as_str),
             Some("backend")
@@ -2226,6 +2301,16 @@ mod tests {
             reloaded.imports[0].metadata.get("team").map(String::as_str),
             Some("platform")
         );
+
+        fs::write(catalog_path.parent().expect("catalog parent").join(".env"), "APP_SECRET_DEMO=rotated-value\n")
+            .expect(".env should be updated");
+        let refreshed = refresh_imported_secret_reference_at_with_programs_for_test(
+            catalog_path.as_path(),
+            "secret/demo",
+            &VendorCliPrograms::from_env(),
+        )
+        .expect("refresh should succeed");
+        assert_eq!(refreshed.reference.value.as_deref(), Some("rotated-value"));
 
         assert!(
             delete_imported_secret_reference_at(catalog_path.as_path(), "secret/demo")

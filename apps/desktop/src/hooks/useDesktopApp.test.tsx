@@ -911,6 +911,7 @@ describe("useDesktopApp runtime wiring", () => {
           resource: "secret/env/api-token",
           display_name: "API Token",
           description: "Imported from dotenv",
+          value: "initial-token",
           tags: ["prod", "api"],
           metadata: {
             owner: "alice",
@@ -928,6 +929,7 @@ describe("useDesktopApp runtime wiring", () => {
           resource: "secret/op/github/password",
           display_name: "Github Password",
           description: null,
+          value: "github-secret",
           tags: ["shared"],
           metadata: {
             owner: "bob",
@@ -960,6 +962,23 @@ describe("useDesktopApp runtime wiring", () => {
             return catalog;
           case "list_onepassword_accounts_command":
             return [];
+          case "refresh_imported_secret_source": {
+            const resource = (payload as { resource: string }).resource;
+            const nextReference = {
+              ...catalog.imports[0],
+              resource,
+              value: "rotated-token",
+              last_verified_at: "2026-04-13T07:30:00.000Z",
+            };
+            catalog = {
+              ...catalog,
+              imports: [nextReference, catalog.imports[1]],
+            };
+            return {
+              catalog_path: catalog.catalog_path,
+              reference: nextReference,
+            };
+          }
           case "update_imported_secret_source": {
             const update = (
               payload as {
@@ -1036,6 +1055,33 @@ describe("useDesktopApp runtime wiring", () => {
       ),
     );
     await flushReact();
+
+    expect(
+      view.container.querySelector<HTMLTextAreaElement>(
+        '[data-testid="imported-secret-value"] textarea',
+      )?.value,
+    ).toBe("initial-token");
+
+    await clickAsync(
+      view.container.querySelector<HTMLButtonElement>(
+        '[data-testid="imported-secret-refresh"]',
+      ),
+    );
+    await flushReact();
+    await flushReact();
+
+    const refreshCall = tauri.invoke.mock.calls.find(
+      ([command]) => command === "refresh_imported_secret_source",
+    );
+    expect(refreshCall).toBeDefined();
+    expect(refreshCall?.[1]).toEqual({
+      resource: "secret/env/api-token",
+    });
+    expect(
+      view.container.querySelector<HTMLTextAreaElement>(
+        '[data-testid="imported-secret-value"] textarea',
+      )?.value,
+    ).toBe("rotated-token");
 
     setFieldValue(
       view.container.querySelector<HTMLTextAreaElement>(

@@ -200,6 +200,7 @@ type ImportedSecretReferenceBase = {
   description?: string | null;
   tags: string[];
   metadata?: Record<string, string>;
+  value?: string | null;
   imported_at: string;
   last_verified_at?: string | null;
 };

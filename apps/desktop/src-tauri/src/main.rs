@@ -12,8 +12,9 @@ use import_browse::{
 use plankton_core::{
     delete_imported_secret_reference, delete_local_secret_entry, import_secret_reference,
     import_secret_references, list_imported_secret_references, list_local_secret_catalog,
-    load_settings, preview_call_chain_for_desktop, save_user_default_policy_mode,
-    save_user_locale, save_user_settings, update_imported_secret_reference,
+    load_settings, preview_call_chain_for_desktop, refresh_imported_secret_reference,
+    save_user_default_policy_mode, save_user_locale, save_user_settings,
+    update_imported_secret_reference,
     upsert_local_secret_literal, AccessRequest, DashboardData, Decision,
     ImportedSecretBatchReceipt, ImportedSecretCatalog, ImportedSecretReceipt,
     ImportedSecretReferenceUpdate, LocalSecretCatalog, LocalSecretLiteralEntry,
@@ -314,6 +315,11 @@ async fn update_imported_secret_source(
 }
 
 #[tauri::command]
+async fn refresh_imported_secret_source(resource: String) -> Result<ImportedSecretReceipt, String> {
+    refresh_imported_secret_reference(resource.as_str()).map_err(|error| error.to_string())
+}
+
+#[tauri::command]
 async fn upsert_local_secret_literal_command(
     entry: LocalSecretLiteralUpsert,
 ) -> Result<LocalSecretLiteralEntry, String> {
@@ -482,6 +488,7 @@ fn run() -> Result<()> {
             list_imported_secret_sources,
             list_local_secret_catalog_command,
             update_imported_secret_source,
+            refresh_imported_secret_source,
             delete_imported_secret_source,
             upsert_local_secret_literal_command,
             delete_local_secret_entry_command,

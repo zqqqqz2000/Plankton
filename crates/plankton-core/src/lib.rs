@@ -49,7 +49,8 @@ pub use template::{
 pub use value_resolver::{
     default_value_resolver, delete_imported_secret_reference, delete_local_secret_entry,
     import_secret_reference, import_secret_references, list_imported_secret_references,
-    list_local_secret_catalog, local_secret_catalog_path, update_imported_secret_reference,
+    list_local_secret_catalog, local_secret_catalog_path, refresh_imported_secret_reference,
+    update_imported_secret_reference,
     upsert_local_secret_literal, ImportedSecretBatchReceipt, ImportedSecretCatalog,
     ImportedSecretReceipt, ImportedSecretReference, ImportedSecretReferenceUpdate,
     LocalSecretCatalog, LocalSecretCatalogResolver, LocalSecretLiteralEntry,

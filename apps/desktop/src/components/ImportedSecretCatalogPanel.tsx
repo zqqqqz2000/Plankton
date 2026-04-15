@@ -17,6 +17,7 @@ type ImportedSecretCatalogPanelProps = {
   locale: Locale;
   noticeMessage: string | null;
   onDelete: (resource: string) => Promise<void>;
+  onRefreshImported: (resource: string) => Promise<void>;
   onReload: (options?: { silent?: boolean }) => Promise<void>;
   onSaveImported: (update: ImportedSecretReferenceUpdate) => Promise<void>;
   onSaveLiteral: (entry: LocalSecretLiteralUpsert) => Promise<void>;
@@ -532,6 +533,7 @@ export function ImportedSecretCatalogPanel(
   const [isCreatingLiteral, setIsCreatingLiteral] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
   const [isDeleting, setIsDeleting] = useState(false);
+  const [isRefreshing, setIsRefreshing] = useState(false);
   const [isLocatorOpen, setIsLocatorOpen] = useState(false);
   const [importedDraft, setImportedDraft] =
     useState<ImportedEditorDraft>(EMPTY_IMPORTED_DRAFT);
@@ -700,12 +702,26 @@ export function ImportedSecretCatalogPanel(
     }
   }
 
+  async function handleRefreshImported(): Promise<void> {
+    if (!selectedEntry || selectedEntry.kind !== "imported") {
+      return;
+    }
+
+    setIsRefreshing(true);
+    try {
+      await props.onRefreshImported(selectedEntry.reference.resource);
+    } finally {
+      setIsRefreshing(false);
+    }
+  }
+
   const canSaveImported =
     selectedEntry?.kind === "imported" &&
     metadataDraft.invalidLines.length === 0 &&
     importedDraftChanged(selectedEntry.reference, importedDraft, metadataDraft.metadata) &&
     !isSaving &&
-    !isDeleting;
+    !isDeleting &&
+    !isRefreshing;
 
   const canSaveLiteral = (() => {
     if (isSaving || isDeleting) {
@@ -744,8 +760,8 @@ export function ImportedSecretCatalogPanel(
       <p className="section-copy">
         {caption(
           props.locale,
-          "Manage imported references and manual local secret values in one tree. Manual values are stored locally, while imported entries keep locator-only metadata.",
-          "通过一棵树统一管理导入引用和手工本地密钥值。手工值会保存在本地；导入项仍只保存 locator 与元信息。",
+          "Manage imported snapshots and manual local secret values in one tree. Imported entries keep a local value snapshot plus the upstream locator for refresh.",
+          "通过一棵树统一管理导入快照和手工本地密钥值。导入项会保存本地值快照，并保留上游 locator 以便刷新。",
         )}
       </p>
 
@@ -1085,10 +1101,26 @@ export function ImportedSecretCatalogPanel(
               <p className="section-copy">
                 {caption(
                   props.locale,
-                  "Imported entries do not store the real secret value locally. Re-import the source or create a manual local secret if you need a local editable value.",
-                  "导入项不会在本地保存真实密钥值。如需本地可编辑的值，请重新导入来源，或新建一个手工本地密钥。",
+                  "Imported entries store a local value snapshot. Use refresh to pull the latest value from the upstream source, or detach it into a manual secret if you want to edit the value locally.",
+                  "导入项会保存一份本地值快照。需要同步上游最新值时请刷新；如果要在本地直接改值，可以把它转成手工密钥。",
                 )}
               </p>
+
+              <div className="settings-form-grid">
+                <label
+                  className="settings-field settings-field-wide"
+                  data-testid="imported-secret-value"
+                >
+                  <span className="field-label">
+                    {caption(props.locale, "Stored Value Snapshot", "已存储值快照")}
+                  </span>
+                  <textarea
+                    className="settings-input note-field"
+                    readOnly
+                    value={selectedEntry.reference.value ?? ""}
+                  />
+                </label>
+              </div>
 
               <div className="settings-form-grid">
                 <label
@@ -1101,9 +1133,10 @@ export function ImportedSecretCatalogPanel(
                   <input
                     className="settings-input"
                     onChange={(event) => {
+                      const nextValue = event.currentTarget.value;
                       setImportedDraft((current) => ({
                         ...current,
-                        displayName: event.currentTarget.value,
+                        displayName: nextValue,
                       }));
                     }}
                     type="text"
@@ -1121,9 +1154,10 @@ export function ImportedSecretCatalogPanel(
                   <input
                     className="settings-input"
                     onChange={(event) => {
+                      const nextValue = event.currentTarget.value;
                       setImportedDraft((current) => ({
                         ...current,
-                        description: event.currentTarget.value,
+                        description: nextValue,
                       }));
                     }}
                     type="text"
@@ -1141,9 +1175,10 @@ export function ImportedSecretCatalogPanel(
                   <input
                     className="settings-input"
                     onChange={(event) => {
+                      const nextValue = event.currentTarget.value;
                       setImportedDraft((current) => ({
                         ...current,
-                        tags: event.currentTarget.value,
+                        tags: nextValue,
                       }));
                     }}
                     type="text"
@@ -1161,9 +1196,10 @@ export function ImportedSecretCatalogPanel(
                   <textarea
                     className="settings-input note-field"
                     onChange={(event) => {
+                      const nextValue = event.currentTarget.value;
                       setImportedDraft((current) => ({
                         ...current,
-                        metadata: event.currentTarget.value,
+                        metadata: nextValue,
                       }));
                     }}
                     value={importedDraft.metadata}
@@ -1238,8 +1274,21 @@ export function ImportedSecretCatalogPanel(
               <div className="actions">
                 <button
                   className="ghost"
+                  data-testid="imported-secret-refresh"
+                  disabled={isSaving || isDeleting || isRefreshing}
+                  onClick={() => {
+                    void handleRefreshImported();
+                  }}
+                  type="button"
+                >
+                  {isRefreshing
+                    ? caption(props.locale, "Refreshing...", "刷新中...")
+                    : caption(props.locale, "Refresh From Source", "从上游更新")}
+                </button>
+                <button
+                  className="ghost"
                   data-testid="imported-secret-edit-local"
-                  disabled={isSaving || isDeleting}
+                  disabled={isSaving || isDeleting || isRefreshing}
                   onClick={() => {
                     startCreatingLiteral(selectedEntry.reference.resource);
                   }}
@@ -1263,7 +1312,7 @@ export function ImportedSecretCatalogPanel(
                 <button
                   className="danger"
                   data-testid="imported-secret-delete"
-                  disabled={isSaving || isDeleting}
+                  disabled={isSaving || isDeleting || isRefreshing}
                   onClick={() => {
                     void handleDelete();
                   }}

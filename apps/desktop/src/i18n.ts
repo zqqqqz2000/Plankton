@@ -13,7 +13,7 @@ const MESSAGES = {
     passwordManagement: "Password Management",
     passwordManagementTitle: "Password Source Imports",
     passwordManagementSubtitle:
-      "Import source locators into the local secret catalog without storing secret snapshots.",
+      "Import source values into the local secret catalog and keep upstream locator metadata for refresh.",
     openCount: "{count} open",
     syncSubmitting: "Submitting",
     syncRefreshing: "Refreshing",
@@ -56,10 +56,10 @@ const MESSAGES = {
     settingsAcpTitle: "ACP",
     passwordProvidersTitle: "Source Providers",
     passwordProvidersHelp:
-      "Choose one provider path, then map only the locator fields that Plankton needs for runtime resolution.",
+      "Choose one provider path, then map the upstream locator fields that Plankton needs to import and refresh the local value snapshot.",
     importDetailsTitle: "Import Details",
     importDetailsHelp:
-      "Resource metadata is stored with the locator so the imported reference can appear in the local secret catalog and CLI directory.",
+      "Resource metadata is stored with the imported value snapshot so the entry can appear in the local secret catalog and CLI directory.",
     importProviderConfigTitle: "Source Locator",
     importProviderConfigHelp:
       "These fields describe where the secret lives in the external provider. Vendor login and unlock flows stay outside the Plankton UI.",
@@ -148,7 +148,7 @@ const MESSAGES = {
     passwordBoundaryNoLogin:
       "No vendor login or unlock form is exposed here. Configure CLI or API auth outside Plankton first.",
     passwordBoundaryNoSnapshot:
-      "Plankton stores only source locators. Secret values, vendor sessions, and provider tokens are not written into SQLite or audit payloads.",
+      "Plankton stores imported secret values in the local catalog for runtime use. SQLite and audit payloads still do not contain secret values, vendor sessions, or provider tokens.",
     passwordBoundaryNoRegression:
       "Approval review and desktop settings stay available while password-source imports run in the same app shell.",
     importSource: "Import Source",
@@ -163,7 +163,7 @@ const MESSAGES = {
     importedField: "Field Selector",
     importedCatalogTitle: "Imported Secret Catalog",
     importedCatalogHelp:
-      "Manage imported references with tree navigation, search, tags, and structured metadata. Locator values stay visible, but secret values remain outside the UI.",
+      "Manage imported value snapshots with tree navigation, search, tags, and structured metadata. Upstream locator values stay visible for refresh.",
     importedCatalogTreeTitle: "Resource Tree",
     importedCatalogDetailsTitle: "Reference Details",
     importedCatalogEmpty: "No imported references yet",
@@ -175,7 +175,7 @@ const MESSAGES = {
       "Search resource, display name, tag, metadata, or locator value",
     sourceLocatorValues: "Source Locator Values",
     sourceLocatorReadonlyHelp:
-      "Locator values are read-only here. Re-import the source if the external path changes.",
+      "Locator values are read-only here. Refresh from upstream to pull a new value, or re-import if the external path itself changes.",
     deleteImport: "Delete Import",
     deletingImport: "Deleting...",
     deleteImportConfirm: "Delete imported reference {resource}?",
@@ -273,7 +273,7 @@ const MESSAGES = {
     passwordManagement: "密码管理",
     passwordManagementTitle: "密码来源导入",
     passwordManagementSubtitle:
-      "把来源定位信息导入本地 secret catalog，不落 secret snapshot。",
+      "把来源值导入本地 secret catalog，并保留上游 locator 元数据用于刷新。",
     openCount: "{count} 个待处理",
     syncSubmitting: "提交中",
     syncRefreshing: "刷新中",
@@ -315,10 +315,10 @@ const MESSAGES = {
     settingsAcpTitle: "ACP",
     passwordProvidersTitle: "来源 Provider",
     passwordProvidersHelp:
-      "先选择 provider 路径，再只填写 Plankton 在运行时解析所需的 locator 字段。",
+      "先选择 provider 路径，再填写 Plankton 导入和刷新本地值快照所需的 locator 字段。",
     importDetailsTitle: "导入详情",
     importDetailsHelp:
-      "这些资源元数据会和 locator 一起保存，方便导入引用进入本地 secret catalog 和 CLI 资源目录。",
+      "这些资源元数据会和导入的值快照一起保存，方便资源进入本地 secret catalog 和 CLI 资源目录。",
     importProviderConfigTitle: "来源定位",
     importProviderConfigHelp:
       "这里只描述 secret 在外部 provider 中的位置；vendor 登录或解锁流程仍在 Plankton UI 外完成。",
@@ -401,7 +401,7 @@ const MESSAGES = {
     passwordBoundaryNoLogin:
       "这里不暴露 vendor 登录或解锁表单；请先在 Plankton 外完成 CLI/API 鉴权。",
     passwordBoundaryNoSnapshot:
-      "Plankton 只保存 source locator，不会把 secret value、vendor session 或 provider token 写入 SQLite 或 audit payload。",
+      "Plankton 会把导入得到的 secret value 保存在本地 catalog 供运行时读取，但不会把它写进 SQLite 或 audit payload；vendor session 和 provider token 也不会落库。",
     passwordBoundaryNoRegression:
       "审批流和 desktop settings 会继续保留在同一个 app shell 中，不会被密码导入流打坏。",
     importSource: "导入来源",
@@ -416,7 +416,7 @@ const MESSAGES = {
     importedField: "字段选择器",
     importedCatalogTitle: "已导入密钥目录",
     importedCatalogHelp:
-      "通过树状结构管理已导入引用，支持搜索、标签和结构化元信息；locator 值可见，但真正的 secret value 不会在 UI 中落出。",
+      "通过树状结构管理已导入值快照，支持搜索、标签和结构化元信息；上游 locator 会保留在 UI 中，便于后续刷新。",
     importedCatalogTreeTitle: "资源树",
     importedCatalogDetailsTitle: "引用详情",
     importedCatalogEmpty: "还没有已导入引用",
@@ -427,7 +427,7 @@ const MESSAGES = {
       "搜索资源路径、显示名、标签、元信息或 locator 值",
     sourceLocatorValues: "来源定位值",
     sourceLocatorReadonlyHelp:
-      "这里的 locator 值只读；如果外部路径变了，请重新导入来源。",
+      "这里的 locator 值只读；需要同步上游新值时请刷新，如果外部路径变了再重新导入来源。",
     deleteImport: "删除导入",
     deletingImport: "删除中...",
     deleteImportConfirm: "确认删除导入引用 {resource} 吗？",

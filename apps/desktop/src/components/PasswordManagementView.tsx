@@ -1672,6 +1672,31 @@ export function PasswordManagementView(
     }
   }
 
+  async function refreshImportedSecret(resource: string): Promise<void> {
+    setCatalogErrorMessage(null);
+
+    try {
+      const receipt = await invoke<ImportedSecretReceipt>(
+        "refresh_imported_secret_source",
+        {
+          resource,
+        },
+      );
+      setCatalogNoticeMessage(
+        sectionCaption(
+          props.locale,
+          `Updated ${receipt.reference.resource} from upstream source`,
+          `已从上游更新 ${receipt.reference.resource}`,
+        ),
+      );
+      await loadImportedCatalog({ silent: true });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      setCatalogErrorMessage(message);
+      throw error;
+    }
+  }
+
   async function saveLocalSecret(
     entry: LocalSecretLiteralUpsert,
   ): Promise<void> {
@@ -2591,6 +2616,7 @@ export function PasswordManagementView(
         locale={props.locale}
         noticeMessage={catalogNoticeMessage}
         onDelete={deleteImportedSecret}
+        onRefreshImported={refreshImportedSecret}
         onReload={loadImportedCatalog}
         onSaveImported={saveImportedSecret}
         onSaveLiteral={saveLocalSecret}

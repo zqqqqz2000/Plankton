@@ -79,7 +79,7 @@ enum Commands {
     #[command(
         visible_alias = "request",
         about = "Request access to one resource and print only its resolved value on successful text output",
-        after_help = "Output contract:\n  text (default): when Plankton both allows the request and resolves the value, stdout prints only the raw value.\n  json: prints a minimal envelope for scripts and tooling.\n  deny, pending, or resolver errors: stdout stays empty and the error or status is reported on stderr. Deny output includes the recorded reason when one is available.\n\nValue source:\n  Values are resolved at runtime from the local secret catalog, not from SQLite, audit records, or provider payloads."
+        after_help = "Output contract:\n  text (default): when Plankton both allows the request and resolves the value, stdout prints only the raw value.\n  json: prints a minimal envelope for scripts and tooling.\n  deny, pending, or resolver errors: stdout stays empty and the error or status is reported on stderr. Deny output includes the recorded reason when one is available.\n\nValue source:\n  Values are returned from the local secret catalog snapshot, not from SQLite, audit records, or provider payloads."
     )]
     Get(GetArgs),
     #[command(
@@ -91,8 +91,8 @@ enum Commands {
     #[command(
         name = "import",
         alias = "import-source",
-        about = "Import a password source locator into the local catalog without storing secret values",
-        after_help = "Supported source kinds:\n  1password-cli: account -> vault -> item -> field\n  bitwarden-cli: account -> organization/collection/folder -> item -> field\n  dotenv-file: file -> namespace/prefix -> key\n\nPlankton verifies the source at import time, then stores only the source locator in the local secret catalog. Secret values, vendor sessions, and provider tokens are not written into SQLite, audit payloads, or provider payloads."
+        about = "Import a password source into the local catalog and store a local value snapshot plus refresh metadata",
+        after_help = "Supported source kinds:\n  1password-cli: account -> vault -> item -> field\n  bitwarden-cli: account -> organization/collection/folder -> item -> field\n  dotenv-file: file -> namespace/prefix -> key\n\nPlankton verifies the source at import time, stores the current secret value in the local secret catalog, and keeps the source locator for later refresh. SQLite audit records and provider payloads still do not contain secret values, vendor sessions, or provider tokens."
     )]
     Import(ImportArgs),
 }
@@ -3536,6 +3536,7 @@ mod tests {
                 description: Some("dotenv-backed".to_string()),
                 tags: vec!["demo".to_string()],
                 metadata: BTreeMap::from([("owner".to_string(), "alice".to_string())]),
+                value: Some("demo-value".to_string()),
                 source_locator: SecretSourceLocator::DotenvFile {
                     file_path: PathBuf::from("/tmp/demo.env"),
                     namespace: Some("dev".to_string()),
