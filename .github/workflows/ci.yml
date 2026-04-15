@@ -32,10 +32,10 @@ jobs:
         run: cargo fmt --all -- --check
 
       - name: Check releasable Rust crates
-        run: cargo check --locked -p plankton-core -p plankton-store -p plankton-cli
+        run: cargo check --locked -p plankton-core -p plankton-store -p plankton
 
       - name: Test releasable Rust crates
-        run: cargo test --locked -p plankton-core -p plankton-store -p plankton-cli -- --nocapture
+        run: cargo test --locked -p plankton-core -p plankton-store -p plankton -- --nocapture
 
   desktop:
     name: Desktop Frontend

@@ -34,7 +34,7 @@ cask "plankton" do
   desc "Local-first approval console for sensitive resource access"
   homepage "${homepage_url}"
 
-  depends_on formula: "plankton-helper"
+  depends_on formula: "zqqqqz2000/tap/plankton-helper"
 
   app "Plankton.app"
 end

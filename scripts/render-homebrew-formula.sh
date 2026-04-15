@@ -9,37 +9,33 @@ fi
 version="$1"
 github_repository="$2"
 checksums_file="$3"
-formula_class="PlanktonCli"
-binary_name="plankton-cli"
+formula_class="PlanktonHelper"
+binary_name="plankton"
 homepage_url="https://github.com/${github_repository}"
-release_base_url="https://github.com/${github_repository}/releases/download/v${version}"
 
 lookup_sha() {
   local archive_name="$1"
   awk -v file="$archive_name" '$2 == file { print $1; exit }' "$checksums_file"
 }
 
-source_archive="plankton-v${version}-source.tar.gz"
-source_sha="$(lookup_sha "$source_archive")"
+archive_name="plankton-v${version}-aarch64-apple-darwin.tar.gz"
+archive_sha="$(lookup_sha "$archive_name")"
 
-if [ -z "$source_sha" ]; then
-  echo "missing checksum for ${source_archive} in ${checksums_file}" >&2
+if [ -z "$archive_sha" ]; then
+  echo "missing checksum for ${archive_name} in ${checksums_file}" >&2
   exit 1
 fi
 
 cat <<EOF
 class ${formula_class} < Formula
-  desc "Read-only CLI for Plankton access attempts, request inspection, and audit queries"
+  desc "Command-line companion installed by the Plankton desktop cask"
   homepage "${homepage_url}"
-  version "${version}"
   license "MIT"
-  url "${release_base_url}/${source_archive}"
-  sha256 "${source_sha}"
-
-  depends_on "rust" => :build
+  url "${homepage_url}/releases/download/v${version}/plankton-v${version}-aarch64-apple-darwin.tar.gz"
+  sha256 "${archive_sha}"
 
   def install
-    system "cargo", "install", "--locked", "--path", "crates/plankton-cli", "--root", prefix
+    bin.install "${binary_name}"
     prefix.install_metafiles
   end
 
