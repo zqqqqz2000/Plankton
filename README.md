@@ -6,6 +6,19 @@ Plankton is a local-first approval console for sensitive resource access. The de
 
 Powered by OpenAquarium
 
+## Codex Skill
+
+This repository ships with a bundled Codex skill at `.codex/skills/secret-access`.
+
+Install it into your local Codex skill directory from the repository root:
+
+```bash
+mkdir -p "${CODEX_HOME:-$HOME/.codex}/skills"
+ln -sfn "$PWD/.codex/skills/secret-access" "${CODEX_HOME:-$HOME/.codex}/skills/secret-access"
+```
+
+After that, Codex can load the skill when a task needs a password, API key, token, credential, or other secret. The skill is designed to request secrets through Plankton and keep returned values out of persistent storage and out of model-visible output.
+
 ## How to Use
 
 ### 1. Install with Homebrew
