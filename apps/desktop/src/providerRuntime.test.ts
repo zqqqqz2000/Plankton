@@ -12,6 +12,7 @@ describe("providerRuntime", () => {
       actualProviderKind: null,
       providerCalled: true,
       providerTrace: {
+        rendered_prompt: null,
         transport: "stdio",
         protocol: null,
         api_version: null,
@@ -48,6 +49,7 @@ describe("providerRuntime", () => {
       actualProviderKind: "claude",
       providerCalled: true,
       providerTrace: {
+        rendered_prompt: null,
         transport: "https",
         protocol: "anthropic_messages",
         api_version: "2023-06-01",
@@ -70,6 +72,7 @@ describe("providerRuntime", () => {
   it("derives Claude from provider trace when provider_kind is absent", () => {
     expect(
       deriveTraceProviderKind(null, {
+        rendered_prompt: null,
         transport: "https",
         protocol: "anthropic_messages",
         api_version: "2023-06-01",

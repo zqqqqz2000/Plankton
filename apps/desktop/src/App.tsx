@@ -111,6 +111,30 @@ function providerLabelOrFallback(locale: Locale, value: string | null): string {
   return value ? label(locale, value) : text(locale, "notAvailable");
 }
 
+function ProviderPromptBlock(props: {
+  locale: Locale;
+  renderedPrompt: string | null;
+  testIdPrefix: string;
+}): JSX.Element | null {
+  if (!props.renderedPrompt) {
+    return null;
+  }
+
+  return (
+    <div data-testid={`${props.testIdPrefix}-provider-rendered-prompt`}>
+      <dt>{text(props.locale, "renderedPrompt")}</dt>
+      <dd>
+        <pre
+          className="payload-block payload-code-block provider-prompt-block"
+          data-testid={`${props.testIdPrefix}-provider-rendered-prompt-block`}
+        >
+          <code className="payload-code">{props.renderedPrompt}</code>
+        </pre>
+      </dd>
+    </div>
+  );
+}
+
 function isAcpTrace(
   providerKind: string | null,
   providerTrace: ProviderTrace | null,
@@ -884,6 +908,7 @@ function ProviderRuntimeCard(props: {
   actualProviderKind: string | null;
   providerCalled: boolean | null;
   providerTrace: ProviderTrace | null;
+  renderedPrompt: string | null;
   testIdPrefix: string;
 }): JSX.Element {
   const [isOpen, setIsOpen] = useState(false);
@@ -995,6 +1020,11 @@ function ProviderRuntimeCard(props: {
                 : text(props.locale, "providerTraceMissing")}
             </dd>
           </div>
+          <ProviderPromptBlock
+            locale={props.locale}
+            renderedPrompt={props.renderedPrompt}
+            testIdPrefix={props.testIdPrefix}
+          />
         </dl>
       ) : (
         <p
@@ -1328,6 +1358,8 @@ export function PendingRequestDetail(props: {
         provider_response_id: request.llm_suggestion.provider_response_id,
         x_request_id: request.llm_suggestion.x_request_id,
         usage_total_tokens: request.llm_suggestion.usage?.total_tokens ?? null,
+        rendered_prompt:
+          request.llm_suggestion.provider_trace?.rendered_prompt ?? null,
         provider_trace: request.llm_suggestion.provider_trace,
       }
     : null;
@@ -1526,6 +1558,7 @@ export function PendingRequestDetail(props: {
             configuredProviderKind={props.settings?.provider_kind ?? null}
             locale={props.locale}
             providerCalled={providerCalled}
+            renderedPrompt={suggestionTrace?.rendered_prompt ?? null}
             providerTrace={suggestionTrace?.provider_trace ?? null}
             testIdPrefix="request"
           />
@@ -1697,6 +1730,7 @@ export function ResolvedAutoDetail(props: {
           configuredProviderKind={props.settings?.provider_kind ?? null}
           locale={props.locale}
           providerCalled={entry.automatic_decision.provider_called}
+          renderedPrompt={suggestionTrace?.rendered_prompt ?? null}
           providerTrace={suggestionTrace?.provider_trace ?? null}
           testIdPrefix="resolved-auto"
         />
@@ -1907,6 +1941,7 @@ export function ResolvedReviewDetail(props: {
           configuredProviderKind={props.settings?.provider_kind ?? null}
           locale={props.locale}
           providerCalled={providerCalled}
+          renderedPrompt={suggestionTrace?.rendered_prompt ?? null}
           providerTrace={suggestionTrace?.provider_trace ?? null}
           testIdPrefix="resolved-review"
         />

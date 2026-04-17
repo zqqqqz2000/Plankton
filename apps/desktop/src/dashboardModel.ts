@@ -31,6 +31,7 @@ export type SuggestionTraceView = {
   provider_response_id: string | null;
   x_request_id: string | null;
   usage_total_tokens: number | null;
+  rendered_prompt: string | null;
   provider_trace: ProviderTrace | null;
 };
 
@@ -169,6 +170,7 @@ function readProviderTrace(value: unknown): ProviderTrace | null {
   }
 
   const providerTrace = {
+    rendered_prompt: readString(record.rendered_prompt),
     transport: readString(record.transport),
     protocol: readString(record.protocol),
     api_version: readString(record.api_version),
@@ -446,6 +448,7 @@ export function getSuggestionTrace(
     ),
     x_request_id: readString(suggestionRecord.payload.x_request_id),
     usage_total_tokens: readUsageTotalTokens(suggestionRecord.payload.usage),
+    rendered_prompt: providerTrace?.rendered_prompt ?? null,
     provider_trace: providerTrace,
   };
 }

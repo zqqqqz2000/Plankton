@@ -1147,6 +1147,7 @@ function renderProviderRuntimeBlock(options: {
   actualProviderKind: string | null;
   providerCalled: boolean | null;
   providerTrace: ProviderTrace | null;
+  renderedPrompt: string | null;
   testIdPrefix: string;
 }): string {
   const runtime = buildProviderRuntimeSummary({
@@ -1216,6 +1217,21 @@ function renderProviderRuntimeBlock(options: {
           <dt>${escapeHtml(text("providerTraceState"))}</dt>
           <dd>${escapeHtml(traceState)}</dd>
         </div>
+        ${
+          options.renderedPrompt
+            ? `
+        <div data-testid="${escapeHtml(options.testIdPrefix)}-provider-rendered-prompt">
+          <dt>${escapeHtml(text("renderedPrompt"))}</dt>
+          <dd>
+            <pre
+              class="payload-block payload-code-block provider-prompt-block"
+              data-testid="${escapeHtml(options.testIdPrefix)}-provider-rendered-prompt-block"
+            ><code class="payload-code">${escapeHtml(options.renderedPrompt)}</code></pre>
+          </dd>
+        </div>
+        `
+            : ""
+        }
       </dl>
     </section>
   `;
@@ -1532,6 +1548,8 @@ function renderRequestDetail(selectedRequest: AccessRequest | null): string {
         x_request_id: selectedRequest.llm_suggestion.x_request_id,
         usage_total_tokens:
           selectedRequest.llm_suggestion.usage?.total_tokens ?? null,
+        rendered_prompt:
+          selectedRequest.llm_suggestion.provider_trace?.rendered_prompt ?? null,
         provider_trace: selectedRequest.llm_suggestion.provider_trace,
       }
     : null;
@@ -1684,6 +1702,7 @@ function renderRequestDetail(selectedRequest: AccessRequest | null): string {
         configuredProviderKind: state.settings?.provider_kind ?? null,
         actualProviderKind,
         providerCalled,
+        renderedPrompt: suggestionTrace?.rendered_prompt ?? null,
         providerTrace: suggestionTrace?.provider_trace ?? null,
         testIdPrefix: "request",
       })}
@@ -1838,6 +1857,7 @@ function renderResolvedAutoDetail(
         configuredProviderKind: state.settings?.provider_kind ?? null,
         actualProviderKind,
         providerCalled: selectedResult.automatic_decision.provider_called,
+        renderedPrompt: suggestionTrace?.rendered_prompt ?? null,
         providerTrace: suggestionTrace?.provider_trace ?? null,
         testIdPrefix: "resolved-auto",
       })}
@@ -2023,6 +2043,7 @@ function renderResolvedReviewDetail(
         configuredProviderKind: state.settings?.provider_kind ?? null,
         actualProviderKind,
         providerCalled,
+        renderedPrompt: suggestionTrace?.rendered_prompt ?? null,
         providerTrace: suggestionTrace?.provider_trace ?? null,
         testIdPrefix: "resolved-review",
       })}

@@ -198,6 +198,7 @@ impl ProviderAdapter for OpenAiCompatibleAdapter {
     }
 
     async fn evaluate(&self, request: ProviderRequest) -> Result<ProviderResponse, ProviderError> {
+        let rendered_prompt = request.prompt.clone();
         let system_message = ChatCompletionRequestSystemMessageArgs::default()
             .content(self.system_prompt.clone())
             .build()
@@ -239,10 +240,10 @@ impl ProviderAdapter for OpenAiCompatibleAdapter {
             }
 
             let followup = self.create_chat_completion(messages, tools).await?;
-            return parse_openai_provider_response(followup);
+            return parse_openai_provider_response(followup, rendered_prompt);
         }
 
-        parse_openai_provider_response(response)
+        parse_openai_provider_response(response, rendered_prompt)
     }
 }
 
@@ -314,6 +315,7 @@ fn execute_openai_read_file_tool(
 
 fn parse_openai_provider_response(
     response: async_openai::types::chat::CreateChatCompletionResponse,
+    rendered_prompt: String,
 ) -> Result<ProviderResponse, ProviderError> {
     let content = response
         .choices
@@ -328,7 +330,10 @@ fn parse_openai_provider_response(
         risk_score: payload.risk_score.min(100),
         provider_response_id: Some(response.id),
         x_request_id: None,
-        provider_trace: None,
+        provider_trace: Some(ProviderTrace {
+            rendered_prompt: Some(rendered_prompt),
+            ..ProviderTrace::default()
+        }),
         usage: response.usage.map(|usage| LlmSuggestionUsage {
             prompt_tokens: usage.prompt_tokens as u32,
             completion_tokens: usage.completion_tokens as u32,
@@ -421,6 +426,7 @@ impl ProviderAdapter for ClaudeMessagesAdapter {
     }
 
     async fn evaluate(&self, request: ProviderRequest) -> Result<ProviderResponse, ProviderError> {
+        let rendered_prompt = request.prompt.clone();
         let response = self
             .client
             .post(format!("{}/v1/messages", self.api_base))
@@ -460,7 +466,12 @@ impl ProviderAdapter for ClaudeMessagesAdapter {
             .await
             .map_err(|error| ProviderError::InvalidResponse(error.to_string()))?;
 
-        parse_claude_provider_response(response_body, request_id, &self.anthropic_version)
+        parse_claude_provider_response(
+            response_body,
+            request_id,
+            &self.anthropic_version,
+            rendered_prompt,
+        )
     }
 }
 
@@ -489,14 +500,17 @@ impl ProviderAdapter for AcpAdapter {
         let prompt = compose_acp_prompt(&self.system_prompt, &request.prompt);
         let result = self.client.prompt_json_suggestion(prompt).await?;
         let payload = parse_suggestion_payload(&result.content)?;
+        let mut trace = result.trace;
+        let x_request_id = trace.client_request_id.clone();
+        trace.rendered_prompt = Some(compose_acp_prompt(&self.system_prompt, &request.prompt));
 
         Ok(ProviderResponse {
             suggested_decision: payload.suggested_decision,
             rationale_summary: payload.rationale_summary,
             risk_score: payload.risk_score.min(100),
             provider_response_id: None,
-            x_request_id: result.trace.client_request_id.clone(),
-            provider_trace: Some(result.trace),
+            x_request_id,
+            provider_trace: Some(trace),
             usage: None,
             model: result.provider_model,
         })
@@ -570,7 +584,10 @@ pub async fn request_llm_suggestion(
                 provider_model: response.model,
                 provider_response_id: response.provider_response_id,
                 x_request_id: response.x_request_id,
-                provider_trace: response.provider_trace,
+                provider_trace: Some(ensure_rendered_prompt(
+                    response.provider_trace,
+                    &provider_input.prompt,
+                )),
                 usage: response.usage,
                 error: None,
                 generated_at: chrono::Utc::now(),
@@ -620,11 +637,25 @@ fn llm_suggestion_from_error(
         provider_model: None,
         provider_response_id: None,
         x_request_id: None,
-        provider_trace: None,
+        provider_trace: Some(ProviderTrace {
+            rendered_prompt: Some(provider_input.prompt.clone()),
+            ..ProviderTrace::default()
+        }),
         usage: None,
         error: Some(error.to_string()),
         generated_at: chrono::Utc::now(),
     }
+}
+
+fn ensure_rendered_prompt(
+    provider_trace: Option<ProviderTrace>,
+    rendered_prompt: &str,
+) -> ProviderTrace {
+    let mut provider_trace = provider_trace.unwrap_or_default();
+    if provider_trace.rendered_prompt.is_none() {
+        provider_trace.rendered_prompt = Some(rendered_prompt.to_string());
+    }
+    provider_trace
 }
 
 fn compose_acp_prompt(system_prompt: &str, prompt: &str) -> String {
@@ -845,12 +876,14 @@ fn parse_claude_provider_response(
     response: ClaudeMessagesResponse,
     request_id: Option<String>,
     anthropic_version: &str,
+    rendered_prompt: String,
 ) -> Result<ProviderResponse, ProviderError> {
     let stop_reason = response.stop_reason.clone().ok_or_else(|| {
         ProviderError::InvalidResponse("Claude response did not include stop_reason".to_string())
     })?;
     let usage = response.usage.as_ref().map(build_claude_usage);
-    let trace = build_claude_provider_trace(anthropic_version, stop_reason.clone());
+    let trace =
+        build_claude_provider_trace(anthropic_version, stop_reason.clone(), rendered_prompt);
 
     match stop_reason.as_str() {
         CLAUDE_STOP_REASON_END_TURN => {
@@ -931,8 +964,13 @@ fn build_claude_usage(usage: &ClaudeUsage) -> LlmSuggestionUsage {
     }
 }
 
-fn build_claude_provider_trace(anthropic_version: &str, stop_reason: String) -> ProviderTrace {
+fn build_claude_provider_trace(
+    anthropic_version: &str,
+    stop_reason: String,
+    rendered_prompt: String,
+) -> ProviderTrace {
     ProviderTrace {
+        rendered_prompt: Some(rendered_prompt),
         transport: Some(CLAUDE_TRANSPORT_HTTPS.to_string()),
         protocol: Some(CLAUDE_PROTOCOL_ANTHROPIC_MESSAGES.to_string()),
         api_version: Some(anthropic_version.to_string()),
@@ -1016,6 +1054,13 @@ mod tests {
                 total_tokens: 40,
             })
         );
+        let rendered_prompt = suggestion
+            .provider_trace
+            .as_ref()
+            .and_then(|trace| trace.rendered_prompt.as_deref())
+            .expect("openai-compatible trace should record the rendered prompt");
+        assert!(rendered_prompt.contains("Review this sanitized access request."));
+        assert!(rendered_prompt.contains("Resource: secret/prod"));
     }
 
     #[tokio::test]
@@ -1139,6 +1184,13 @@ mod tests {
                 .map(|trace| trace.beta_headers.clone()),
             Some(Vec::new())
         );
+        let rendered_prompt = suggestion
+            .provider_trace
+            .as_ref()
+            .and_then(|trace| trace.rendered_prompt.as_deref())
+            .expect("claude trace should record the rendered prompt");
+        assert!(rendered_prompt.contains("Review this sanitized access request."));
+        assert!(rendered_prompt.contains("Resource: config/dev-readonly"));
     }
 
     #[tokio::test]
@@ -1184,6 +1236,13 @@ mod tests {
         assert_eq!(suggestion.provider_kind, CLAUDE_PROVIDER_KIND);
         assert_eq!(suggestion.suggested_decision, SuggestedDecision::Escalate);
         assert_eq!(suggestion.risk_score, 100);
+        let rendered_prompt = suggestion
+            .provider_trace
+            .as_ref()
+            .and_then(|trace| trace.rendered_prompt.as_deref())
+            .expect("fail-closed trace should still record the rendered prompt");
+        assert!(rendered_prompt.contains("Review this sanitized access request."));
+        assert!(rendered_prompt.contains("Resource: config/dev-readonly"));
         assert!(
             suggestion
                 .error

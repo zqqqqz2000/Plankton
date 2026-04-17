@@ -113,6 +113,7 @@ const DASHBOARD: DashboardData = {
         risk_score: 16,
         template_version: "v2",
         provider_trace: {
+          rendered_prompt: null,
           protocol: "anthropic_messages",
           api_version: "2023-06-01",
           output_format: "json",
@@ -157,6 +158,7 @@ const DASHBOARD: DashboardData = {
         risk_score: 8,
         template_version: "v3",
         provider_trace: {
+          rendered_prompt: null,
           transport: "stdio",
           package_name: "@zed-industries/codex-acp",
           package_version: "0.11.1",

@@ -36,6 +36,7 @@ export type LlmSuggestionUsage = {
 };
 
 export type ProviderTrace = {
+  rendered_prompt: string | null;
   transport: string | null;
   protocol: string | null;
   api_version: string | null;

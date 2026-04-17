@@ -872,6 +872,14 @@ button:disabled {
   min-height: 140px;
 }
 
+.provider-prompt-block {
+  max-height: 280px;
+  min-height: 120px;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
 .payload-code {
   display: block;
   color: var(--color-text);

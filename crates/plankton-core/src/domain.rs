@@ -137,6 +137,8 @@ pub struct ProviderInputSnapshot {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct ProviderTrace {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rendered_prompt: Option<String>,
     pub transport: Option<String>,
     pub protocol: Option<String>,
     pub api_version: Option<String>,

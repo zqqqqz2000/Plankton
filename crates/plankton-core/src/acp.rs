@@ -287,6 +287,7 @@ async fn run_acp_prompt_local(
         content,
         provider_model,
         trace: ProviderTrace {
+            rendered_prompt: None,
             transport: Some(config.transport),
             protocol: None,
             api_version: None,

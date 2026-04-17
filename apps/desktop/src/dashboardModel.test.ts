@@ -475,6 +475,7 @@ describe("dashboardModel", () => {
         payload: {
           provider_model: "codex@1.2.3",
           provider_trace: {
+            rendered_prompt: null,
             transport: "stdio",
             package_name: "@zed-industries/codex-acp",
             package_version: "0.11.1",
@@ -494,7 +495,9 @@ describe("dashboardModel", () => {
       provider_response_id: null,
       x_request_id: null,
       usage_total_tokens: null,
+      rendered_prompt: null,
       provider_trace: {
+        rendered_prompt: null,
         transport: "stdio",
         protocol: null,
         api_version: null,
@@ -524,6 +527,7 @@ describe("dashboardModel", () => {
           provider_response_id: "msg_123",
           x_request_id: "req_claude_123",
           provider_trace: {
+            rendered_prompt: "Review config/dev-readonly",
             transport: "https",
             protocol: "anthropic_messages",
             api_version: "2023-06-01",
@@ -541,7 +545,9 @@ describe("dashboardModel", () => {
       provider_response_id: "msg_123",
       x_request_id: "req_claude_123",
       usage_total_tokens: null,
+      rendered_prompt: "Review config/dev-readonly",
       provider_trace: {
+        rendered_prompt: "Review config/dev-readonly",
         transport: "https",
         protocol: "anthropic_messages",
         api_version: "2023-06-01",

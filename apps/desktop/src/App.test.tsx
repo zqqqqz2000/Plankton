@@ -104,6 +104,7 @@ function buildPendingRequest(): AccessRequest {
       provider_response_id: "resp-1",
       x_request_id: "x-req-1",
       provider_trace: {
+        rendered_prompt: "Review secret/demo",
         transport: "stdio",
         protocol: null,
         api_version: null,
@@ -149,6 +150,7 @@ function buildReviewAuditRecords(requestId: string): AuditRecord[] {
         x_request_id: "claude-request-1",
         usage: { total_tokens: 321 },
         provider_trace: {
+          rendered_prompt: "Review secret/review",
           protocol: "anthropic_messages",
           api_version: "2023-06-01",
           output_format: "json",
@@ -189,6 +191,7 @@ function buildAutoAuditRecords(requestId: string): AuditRecord[] {
         x_request_id: "acp-request-1",
         usage: { total_tokens: 123 },
         provider_trace: {
+          rendered_prompt: "Review secret/auto",
           transport: "stdio",
           package_name: "@zed-industries/codex-acp",
           package_version: "0.11.1",
@@ -232,6 +235,17 @@ describe("desktop React parity", () => {
     expect(
       view.container.querySelector('[data-testid="acp-provider-trace-card"]'),
     ).not.toBeNull();
+    const requestRuntimeToggle = view.container.querySelector<HTMLButtonElement>(
+      '[data-testid="request-provider-runtime-toggle"]',
+    );
+    act(() => {
+      requestRuntimeToggle?.click();
+    });
+    expect(
+      view.container.querySelector(
+        '[data-testid="request-provider-rendered-prompt-block"]',
+      )?.textContent,
+    ).toContain("Review secret/demo");
 
     act(() => {
       textareaBefore?.focus();
@@ -308,7 +322,6 @@ describe("desktop React parity", () => {
         view.container.querySelector(`[data-testid="${testId}"]`),
       ).not.toBeNull();
     }
-
     act(() => {
       if (modalBefore) {
         modalBefore.scrollTop = 180;
@@ -380,6 +393,17 @@ describe("desktop React parity", () => {
         view.container.querySelector(`[data-testid="${testId}"]`),
       ).not.toBeNull();
     }
+    const reviewRuntimeToggle = view.container.querySelector<HTMLButtonElement>(
+      '[data-testid="resolved-review-provider-runtime-toggle"]',
+    );
+    act(() => {
+      reviewRuntimeToggle?.click();
+    });
+    expect(
+      view.container.querySelector(
+        '[data-testid="resolved-review-provider-rendered-prompt-block"]',
+      )?.textContent,
+    ).toContain("Review secret/review");
 
     view.unmount();
   });
@@ -436,6 +460,17 @@ describe("desktop React parity", () => {
         view.container.querySelector(`[data-testid="${testId}"]`),
       ).not.toBeNull();
     }
+    const autoRuntimeToggle = view.container.querySelector<HTMLButtonElement>(
+      '[data-testid="resolved-auto-provider-runtime-toggle"]',
+    );
+    act(() => {
+      autoRuntimeToggle?.click();
+    });
+    expect(
+      view.container.querySelector(
+        '[data-testid="resolved-auto-provider-rendered-prompt-block"]',
+      )?.textContent,
+    ).toContain("Review secret/auto");
 
     view.unmount();
   });
