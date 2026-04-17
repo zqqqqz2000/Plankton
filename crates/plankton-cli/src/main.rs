@@ -17,9 +17,8 @@ use plankton_core::{
     import_secret_reference, list_local_secret_catalog, load_settings, prompt_call_chain_paths,
     AccessRequest, ApprovalStatus, AuditAction, AuditRecord, AutomaticDecisionSource,
     AutomaticDecisionTrace, AutomaticDisposition, Decision, LlmSuggestion, LlmSuggestionUsage,
-    LocalSecretCatalog, LocalSecretLiteralEntry, PlanktonSettings, PolicyMode, ProviderTrace,
-    RequestContext, SecretImportSpec, SecretSourceLocator, SuggestedDecision, ValueResolver,
-    ValueResolverError,
+    LocalSecretCatalog, LocalSecretLiteralEntry, PolicyMode, ProviderTrace, RequestContext,
+    SecretImportSpec, SecretSourceLocator, SuggestedDecision, ValueResolver, ValueResolverError,
 };
 use plankton_store::{RequestQueryResult, SqliteStore};
 use serde::Serialize;
@@ -35,7 +34,7 @@ const GET_POLL_INTERVAL: Duration = Duration::from_millis(250);
     version,
     about = "Plankton command-line companion for listing resources, importing password sources, and requesting access",
     arg_required_else_help = true,
-    after_help = "Examples:\n  plankton list\n  plankton search api-token\n  plankton import dotenv-file --resource secret/api-token --file .env --key API_TOKEN\n  plankton get secret/api-token --reason \"Smoke test\" --requested-by alice\n  plankton get secret/api-token --reason \"Auto smoke\" --policy-mode auto\n  plankton get secret/api-token --reason \"Scripted smoke\" --output json\n\nSuccessful `get` text output prints only the resolved secret value. Use `--output json` for a minimal machine-readable envelope. When a request is denied and a recorded reason is available, Plankton appends that reason to the deny error.\n\nHuman approvals and request history live in the desktop UI. The public CLI surface is intentionally limited to `get`, `list`, `search`, and `import`."
+    after_help = "Examples:\n  plankton list\n  plankton search api-token\n  plankton import dotenv-file --resource secret/api-token --file .env --key API_TOKEN\n  plankton get secret/api-token --reason \"Smoke test\" --requested-by alice\n  plankton get secret/api-token --reason \"Scripted smoke\" --output json\n\nSuccessful `get` text output prints only the resolved secret value. Use `--output json` for a minimal machine-readable envelope. When a request is denied and a recorded reason is available, Plankton appends that reason to the deny error.\n\nHuman approvals and request history live in the desktop UI. The public CLI surface is intentionally limited to `get`, `list`, `search`, and `import`."
 )]
 struct Cli {
     #[arg(
@@ -54,24 +53,6 @@ enum OutputFormat {
     Text,
     Json,
     Jsonl,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
-enum CliPolicyMode {
-    #[value(name = "human-review", alias = "manual-only")]
-    ManualOnly,
-    Auto,
-    Assisted,
-}
-
-impl From<CliPolicyMode> for PolicyMode {
-    fn from(value: CliPolicyMode) -> Self {
-        match value {
-            CliPolicyMode::ManualOnly => PolicyMode::ManualOnly,
-            CliPolicyMode::Auto => PolicyMode::LlmAutomatic,
-            CliPolicyMode::Assisted => PolicyMode::Assisted,
-        }
-    }
 }
 
 #[derive(Debug, Subcommand)]
@@ -131,12 +112,6 @@ struct GetArgs {
         help = "Repeat to attach extra request metadata"
     )]
     metadata: Vec<String>,
-    #[arg(
-        long,
-        value_enum,
-        help = "Choose Human Review, assisted review with an LLM suggestion, or fully automatic LLM disposition. When omitted, Plankton uses the configured default policy mode from settings."
-    )]
-    policy_mode: Option<CliPolicyMode>,
 }
 
 #[derive(Debug, Args)]
@@ -529,7 +504,6 @@ async fn run() -> Result<ExitCode> {
                 requested_by,
                 env_vars,
                 metadata,
-                policy_mode,
             } = args;
             let call_chain =
                 collect_runtime_call_chain().context("failed to collect runtime call chain")?;
@@ -554,7 +528,7 @@ async fn run() -> Result<ExitCode> {
                 .submit_request(
                     &settings,
                     context,
-                    resolve_requested_policy_mode(policy_mode, &settings),
+                    settings.default_policy_mode,
                 )
                 .await
                 .context("failed to submit access request")?;
@@ -646,15 +620,6 @@ fn default_actor() -> String {
     env::var("USER")
         .or_else(|_| env::var("USERNAME"))
         .unwrap_or_else(|_| "unknown".to_string())
-}
-
-fn resolve_requested_policy_mode(
-    requested: Option<CliPolicyMode>,
-    settings: &PlanktonSettings,
-) -> PolicyMode {
-    requested
-        .map(PolicyMode::from)
-        .unwrap_or(settings.default_policy_mode)
 }
 
 fn resolve_output(
@@ -2370,7 +2335,6 @@ mod tests {
                 assert_eq!(args.resource.as_deref(), Some("secret/api-token"));
                 assert_eq!(args.requested_by, Some("alice".to_string()));
                 assert_eq!(args.metadata, vec!["environment=dev".to_string()]);
-                assert_eq!(args.policy_mode, None);
             }
             _ => panic!("expected get command"),
         }
@@ -2392,88 +2356,9 @@ mod tests {
             Commands::Get(args) => {
                 assert_eq!(args.resource_flag.as_deref(), Some("secret/api-token"));
                 assert_eq!(args.reason, "Need smoke test access");
-                assert_eq!(args.policy_mode, None);
             }
             _ => panic!("expected get command"),
         }
-    }
-
-    #[test]
-    fn parses_assisted_policy_mode() {
-        let cli = Cli::try_parse_from([
-            "plankton",
-            "get",
-            "secret/api-token",
-            "--reason",
-            "Need smoke test access",
-            "--policy-mode",
-            "assisted",
-        ])
-        .expect("assisted policy mode should parse");
-
-        match cli.command {
-            Commands::Get(args) => {
-                assert_eq!(args.policy_mode, Some(CliPolicyMode::Assisted));
-            }
-            _ => panic!("expected get command"),
-        }
-    }
-
-    #[test]
-    fn parses_auto_policy_mode() {
-        let cli = Cli::try_parse_from([
-            "plankton",
-            "get",
-            "secret/api-token",
-            "--reason",
-            "Need smoke test access",
-            "--policy-mode",
-            "auto",
-        ])
-        .expect("auto policy mode should parse");
-
-        match cli.command {
-            Commands::Get(args) => {
-                assert_eq!(args.policy_mode, Some(CliPolicyMode::Auto));
-            }
-            _ => panic!("expected get command"),
-        }
-    }
-
-    #[test]
-    fn parses_legacy_manual_only_policy_mode_alias() {
-        let cli = Cli::try_parse_from([
-            "plankton",
-            "get",
-            "secret/api-token",
-            "--reason",
-            "Need smoke test access",
-            "--policy-mode",
-            "manual-only",
-        ])
-        .expect("legacy manual-only policy mode should still parse");
-
-        match cli.command {
-            Commands::Get(args) => {
-                assert_eq!(args.policy_mode, Some(CliPolicyMode::ManualOnly));
-            }
-            _ => panic!("expected get command"),
-        }
-    }
-
-    #[test]
-    fn resolves_policy_mode_from_settings_when_flag_is_omitted() {
-        let mut settings = load_settings().expect("default settings should load");
-        settings.default_policy_mode = PolicyMode::LlmAutomatic;
-
-        assert_eq!(
-            resolve_requested_policy_mode(None, &settings),
-            PolicyMode::LlmAutomatic
-        );
-        assert_eq!(
-            resolve_requested_policy_mode(Some(CliPolicyMode::Assisted), &settings),
-            PolicyMode::Assisted
-        );
     }
 
     #[test]
@@ -2790,20 +2675,19 @@ mod tests {
     }
 
     #[test]
-    fn get_help_uses_productized_policy_mode_terms() {
-        let mut command = Cli::command();
-        let get_help = command
-            .find_subcommand_mut("get")
-            .expect("get subcommand should exist")
-            .render_long_help()
-            .to_string();
+    fn get_rejects_policy_mode_flag() {
+        let error = Cli::try_parse_from([
+            "plankton",
+            "get",
+            "secret/api-token",
+            "--reason",
+            "Need smoke test access",
+            "--policy-mode",
+            "auto",
+        ])
+        .expect_err("get should reject removed --policy-mode flag");
 
-        assert!(get_help.contains("Choose Human Review"));
-        assert!(get_help.contains(
-            "When omitted, Plankton uses the configured default policy mode from settings."
-        ));
-        assert!(get_help.contains("[possible values: human-review, auto, assisted]"));
-        assert!(!get_help.contains("manual-only"));
+        assert!(error.to_string().contains("--policy-mode"));
     }
 
     #[test]

@@ -2,7 +2,7 @@
 
 # Plankton
 
-Plankton 是一个面向敏感资源访问的本地优先审批控制台。桌面 UI 是策略配置面和人工审批面，CLI 则是操作者与 LLM 发起访问尝试、查询状态和读取审计信息的入口。
+Plankton 是一个面向敏感资源访问的本地优先审批控制台。桌面 UI 是策略配置面和人工审批面，CLI 则是操作者与 LLM 列出、搜索可用资源标识并发起访问请求的入口。
 
 Powered by OpenAquarium
 
@@ -23,14 +23,14 @@ ln -sfn "$PWD/.codex/skills/secret-access" "${CODEX_HOME:-$HOME/.codex}/skills/s
 
 ### 1. 通过 Homebrew 安装
 
-默认安装路径是项目自有 tap 加 CLI formula：
+默认安装路径是项目自有 tap 加 desktop cask：
 
 ```bash
-brew install zqqqqz2000/tap/plankton-cli
-plankton-cli
+brew install --cask zqqqqz2000/tap/plankton
+plankton
 ```
 
-这不是 `homebrew-core` formula，也不是 desktop cask。仓库已经按这条安装路径准备好了，但第一次对外发布仍受外部前提阻塞：必须先具备 tap 仓库和 GitHub 凭据，这条安装方式才能真正对所有人可用。
+这是一条 tap 自有 cask 路径，不是 `homebrew-core` formula。这个 cask 会一起安装 `Plankton.app` 和 `plankton` 命令；tap 里即使仍存在内部 helper formula，它也不是面向用户的主入口。
 
 ### 2. 通过源码安装并准备本地开发环境
 
@@ -51,30 +51,56 @@ make tauri-dev
 
 ### 4. 在 UI 中选择策略模式
 
-- `人工审批` 是 UI 中专门用于人工审批的策略模式。人工审批发生在桌面 UI 中，不是 CLI 审批流。
+- `人工审批` 是 UI 中专门用于人工审批的策略模式。人工审批发生在桌面 UI 中，不是 CLI 审批流；`plankton get` 也不会再通过命令行参数覆盖这个模式。
 - `assisted` 会先向 provider 获取建议，再由桌面 UI 中的人类做最终决定。
 - `auto` 会在本地护栏和 provider 建议的基础上自动得到 allow、deny 或 escalate，同时让结果在 UI 和 CLI 中都可见。
 
-### 5. 用 CLI 发起访问尝试并做只读查询
+### 5. 用 CLI 列出、搜索、导入来源并发起访问请求
 
-发起一次访问尝试：
+先列出当前可供本地 LLM 请求的资源标识：
 
 ```bash
-cargo run -p plankton-cli -- get secret/api-token \
+plankton list
+```
+
+这个命令只会输出标识和必要元信息，不会直接打印密钥值。
+
+如果你只想在同一批标识里做模糊搜索，可以直接运行：
+
+```bash
+plankton search api-token
+```
+
+`search` 只会对 `list` 同一资源标识视图做模糊匹配，返回的仍然只是标识和必要元信息，不会输出密钥值。
+
+如果你希望 Plankton 从密码管理器或 `.env` 文件里解析 value，但又不把 secret snapshot 落进 SQLite，可以先把 source locator 导入本地 secret catalog：
+
+```bash
+plankton import dotenv-file \
+  --resource secret/api-token \
+  --file .env \
+  --key API_TOKEN
+```
+
+导入时会先对来源做一次运行时校验，把当前 secret value 写入本地 secret catalog，并保留 locator 元数据以便后续从上游刷新。secret value 仍不会进入 SQLite、audit payload 或 provider payload；vendor session、provider token 也不会被持久化。
+
+再用安装后的命令请求其中一个资源：
+
+```bash
+plankton get secret/api-token \
   --reason "Need readonly dev config" \
   --requested-by alice
 ```
 
-在 CLI 中查询同一条请求：
+成功时，默认 text 输出只会打印一个解析出来的裸 value，不会再附带 request ID、审批摘要、provider 元信息或其他包装文本。
 
-```bash
-cargo run -p plankton-cli -- queue
-cargo run -p plankton-cli -- status <request-id>
-cargo run -p plankton-cli -- suggestion <request-id>
-cargo run -p plankton-cli -- audit --limit 20
-```
+如果你需要给脚本或工具链消费的结构化结果，请改用 `--output json`。JSON 路径会返回一个最小专用 envelope，而不是整包 request 或 audit dump。
 
-`queue` 是当前的列表式查询入口。人工审批不在这里完成，而是在桌面 UI 中完成。
+这个 value 会在运行时从本地 secret catalog 直接返回，不会从 SQLite、audit 记录或 provider payload 中读回。这个 catalog 既可以存直接值，也可以存带刷新元数据的导入快照（例如来自 `.env`、1Password CLI、Bitwarden CLI）。如果你的环境使用显式 catalog 文件，请先把它指给 Plankton（例如 `PLANKTON_SECRET_FILE=/abs/path/...`）。
+
+如果这次请求不能自动完成，Plankton 会把流程交给桌面 UI。人工审批、建议查看和审计查看都在 UI 中完成。非成功路径保持 `stdout` 为空，状态或错误会单独输出。若一次 deny 记录里带有原因或备注，Plankton 会把该原因追加到 deny 错误里；如果没有记录原因，则继续保持简洁的 denied 提示。
+
+如果你当前是在源码仓库里做本地开发，而不是使用 cask 安装，可以把同样的命令换成 `cargo run -p plankton -- ...`。
 
 ### 6. 只有在需要 assisted 或 auto 时才配置 provider
 
@@ -104,10 +130,35 @@ export PLANKTON_CLAUDE_API_KEY=...
 export PLANKTON_CLAUDE_MODEL=...
 ```
 
+### 7. 密码源后端
+
+Plankton 的本地 secret catalog 现在可以保存导入得到的 secret snapshot，并带上 provider refresh metadata。当前首版后端形态是：
+
+- `1password_cli`
+- `bitwarden_cli`
+- `dotenv_file`
+
+导入后会同时保存当前本地值快照和 source locator，例如 `vault -> item -> field`、`organization/folder -> item -> field`、或 `file -> key`。vendor token、session 不会写进 SQLite、audit records 或 provider payload。
+
+已测试：
+
+- `.env` 快照的本地持久化、上游刷新与运行时解析
+- `1password_cli` / `bitwarden_cli` 的响应解析与 field 抽取 contract tests
+- `list/search` 已切到 active resolver catalog，不再读 SQLite grant provenance
+
+尚未测试：
+
+- `1Password` app integration 的真实认证链，尤其是 Windows / Linux 桌面认证行为
+- `OP_SERVICE_ACCOUNT_TOKEN`
+- `Bitwarden Password Manager CLI` 对真实 vault 的 login / unlock / API key 路径
+- `Bitwarden` 的 SSO、自托管、多 profile、attachment、TOTP
+- `Bitwarden Secrets Manager CLI` 作为 Plankton 后端
+- `.env` multiline 边界和 Windows 路径行为
+
 ## UI 与 CLI 的分工
 
 - UI 负责策略配置和人工审批。
-- CLI 负责发起访问尝试和读取状态，不承担常规的人类审批职责。
+- CLI 负责列出资源、导入 source locator 和发起访问请求，不承担人工审批或审计管理职责。
 - 如果仓库里仍然能看到 `approve` 或 `reject`，应把它们视为内部或遗留兼容路径，而不是面向用户的主流程。
 
 ## 延伸阅读
@@ -121,5 +172,5 @@ export PLANKTON_CLAUDE_MODEL=...
 - 每一次访问都会先变成一条显式请求，而不是隐式副作用。
 - 在 provider 看到上下文之前，敏感信息会先被裁剪和脱敏。
 - 即使启用了 provider，本地护栏仍然是最终的安全边界。
-- 同一条请求会同时出现在桌面 UI 和 CLI 的共享审计链路中，因此可以被复盘和解释。
+- 每一条请求的详细审批与审计链路都由桌面 UI 承接和解释。
 - 当上下文不完整、provider 返回非法结果或触发风险边界时，系统会默认 fail-closed。

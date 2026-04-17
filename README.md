@@ -2,7 +2,7 @@
 
 # Plankton
 
-Plankton is a local-first approval console for sensitive resource access. The desktop UI is the policy surface and the human approval surface. The CLI is the operator and LLM entrypoint for access attempts and read-only inspection.
+Plankton is a local-first approval console for sensitive resource access. The desktop UI is the policy surface and the human approval surface. The CLI is the operator and LLM entrypoint for listing, searching, and requesting resource access.
 
 Powered by OpenAquarium
 
@@ -23,14 +23,14 @@ After that, Codex can load the skill when a task needs a password, API key, toke
 
 ### 1. Install with Homebrew
 
-The default install path is the project-owned tap and CLI formula:
+The default install path is the project-owned tap and desktop cask:
 
 ```bash
-brew install zqqqqz2000/tap/plankton-cli
-plankton-cli
+brew install --cask zqqqqz2000/tap/plankton
+plankton
 ```
 
-This is not a `homebrew-core` formula and not a desktop cask. The repository is already prepared for this install path, but the first public release is still blocked by external prerequisites: the tap repository and GitHub credentials must be available before the formula can be published for everyone.
+This is a tap-owned cask, not a `homebrew-core` formula. The cask installs both `Plankton.app` and the `plankton` command. An internal helper formula may still exist inside the tap, but it is not the user-facing entrypoint.
 
 ### 2. Install from source for local development
 
@@ -51,30 +51,56 @@ Keep the desktop window open. Daily use is centered on the UI.
 
 ### 4. Choose the strategy in the UI
 
-- `Human Review` is the UI-only strategy mode for human approval. A human reviews and approves or rejects in the desktop UI. This is not a CLI approval flow.
+- `Human Review` is the UI-only strategy mode for human approval. A human reviews and approves or rejects in the desktop UI. This is not a CLI approval flow, and `plankton get` does not override it with a command-line policy flag.
 - `assisted` asks a provider for a suggestion, then keeps the final human decision in the desktop UI.
 - `auto` lets local guardrails and the provider produce an automatic allow, deny, or escalate outcome, while keeping the result visible in both UI and CLI.
 
-### 5. Use the CLI for access attempts and read-only inspection
+### 5. Use the CLI to list, search, import sources, and request access
 
-Create an access attempt:
+List the resource identifiers currently available to the local LLM surface:
 
 ```bash
-cargo run -p plankton-cli -- get secret/api-token \
+plankton list
+```
+
+This command lists identifiers and minimal metadata only. It does not print secret values.
+
+Search the same identifier view with a fuzzy resource match:
+
+```bash
+plankton search api-token
+```
+
+`search` narrows the same resource identifier surface returned by `list`. It still returns identifiers and minimal metadata only, never secret values.
+
+If you want Plankton to resolve values from a password manager or `.env` file without copying secret snapshots into SQLite, import the current secret value into the local secret catalog and keep the upstream locator for refresh:
+
+```bash
+plankton import dotenv-file \
+  --resource secret/api-token \
+  --file .env \
+  --key API_TOKEN
+```
+
+The import path verifies the source at import time, stores the current secret value in the local secret catalog, and keeps the locator metadata so the desktop tree can refresh from upstream later. Secret values still do not go into SQLite, audit payloads, or provider payloads, and vendor sessions or provider tokens are not persisted.
+
+Request one resource with the installed command:
+
+```bash
+plankton get secret/api-token \
   --reason "Need readonly dev config" \
   --requested-by alice
 ```
 
-Inspect the same request from the CLI:
+On success, the default text output prints only the resolved secret value. It does not print request IDs, approval summaries, provider metadata, or other wrappers around the value.
 
-```bash
-cargo run -p plankton-cli -- queue
-cargo run -p plankton-cli -- status <request-id>
-cargo run -p plankton-cli -- suggestion <request-id>
-cargo run -p plankton-cli -- audit --limit 20
-```
+If you need machine-readable output instead of a bare value, use `--output json`. The JSON path is intentionally a small `get`-specific envelope rather than a full request or audit dump.
 
-`queue` is the current list-style query surface. Human approval does not happen here; it happens in the desktop UI.
+The value itself is returned at runtime from the local secret catalog, not from SQLite, audit records, or provider payloads. That catalog can contain direct values or imported snapshots with refresh metadata (for example from `.env`, 1Password CLI, or Bitwarden CLI). If your environment uses an explicit catalog file, point Plankton at it before running `get` (for example with `PLANKTON_SECRET_FILE=/abs/path/...`).
+
+If the request cannot be completed automatically, Plankton hands off to the desktop UI. Human approval, suggestion review, and audit inspection all happen there. Non-success paths keep `stdout` empty and report status or errors separately. When a request is denied and the recorded decision includes a reason or note, Plankton appends that reason to the deny error. When no reason was recorded, the deny output stays concise.
+
+If you are working from a source checkout instead of the cask, run the same commands with `cargo run -p plankton -- ...`.
 
 ### 6. Configure a provider only when you need assisted or auto
 
@@ -104,10 +130,35 @@ export PLANKTON_CLAUDE_API_KEY=...
 export PLANKTON_CLAUDE_MODEL=...
 ```
 
+### 7. Password Source Backends
+
+Plankton's local secret catalog can store imported secret snapshots together with provider refresh metadata. The current first-pass backend shapes are:
+
+- `1password_cli`
+- `bitwarden_cli`
+- `dotenv_file`
+
+Imported entries keep both the current local value snapshot and a source locator such as `vault -> item -> field`, `organization/folder -> item -> field`, or `file -> key`. Vendor tokens and sessions are not written into SQLite, audit records, or provider payloads.
+
+Tested:
+
+- `.env` snapshot persistence, upstream refresh, and runtime resolution from the local secret catalog
+- contract tests for `1password_cli` and `bitwarden_cli` response parsing and field extraction
+- list/search using the active resolver catalog instead of SQLite grant provenance
+
+Untested:
+
+- `1Password` app integration flows outside local contract tests, including Windows/Linux desktop auth behavior
+- `OP_SERVICE_ACCOUNT_TOKEN`
+- `Bitwarden Password Manager CLI` login/unlock/API-key flows against a real vault
+- `Bitwarden` SSO, self-hosted, multi-profile, attachment, and TOTP paths
+- `Bitwarden Secrets Manager CLI` as a Plankton backend
+- `.env` multiline edge cases and Windows path behavior
+
 ## Operator Boundaries
 
 - The UI owns strategy configuration and human approval.
-- The CLI is for requesting access and reading state, not for normal human approval.
+- The CLI is for listing resources, importing source locators, and requesting resource access, not for human approval or audit management.
 - If you still see `approve` or `reject` in the repository, treat them as internal or legacy compatibility paths, not as the primary operator workflow.
 
 ## Further Reading
@@ -121,5 +172,5 @@ export PLANKTON_CLAUDE_MODEL=...
 - Every access attempt becomes an explicit request before any approval or model action happens.
 - Sensitive context is sanitized before a provider sees it.
 - Local guardrails stay authoritative even when a provider is enabled.
-- The same request can be explained from both the desktop UI and the CLI through a shared audit trail.
+- The desktop UI owns the detailed approval and audit trail for every request.
 - The system is designed to fail closed when context is incomplete, a provider response is invalid, or a risk boundary is crossed.
